@@ -1,5 +1,10 @@
 #ifndef KERNEL_H
 #define KERNEL_H
+#define VGA_ADDRESS 0xb8000
+#define VGA_WIDTH 80
+#define VGA_HEIGHT 25
+#define DEFAULT_COLOR  ((0x0 << 4) | 0xa)
+
 
 typedef unsigned char u8;
 typedef unsigned short u16;

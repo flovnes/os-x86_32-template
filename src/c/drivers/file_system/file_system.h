@@ -17,7 +17,7 @@ struct imfs_file {
 };
 
 void init_imfs();
-int imfs_create_file(const char *filename);
+int create_file(const char *filename);
 int write_file(const char *filename, const char *data);
 const char* read_file(const char *filename); // const char* to content or NULL
 int delete_file(const char *filename);

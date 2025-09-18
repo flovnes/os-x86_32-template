@@ -80,7 +80,7 @@ int find_free_file_index() {
     return -1;
 }
 
-int imfs_create_file(const char *filename) {
+int create_file(const char *filename) {
     if (strlen_custom(filename) == 0 || strlen_custom(filename) > MAX_FILENAME_LENGTH) {
         return -1;
     }
@@ -108,7 +108,7 @@ int write_file(const char *filename, const char *data) {
 
     int file_idx = find_file_index(filename);
     if (file_idx == -1) {
-        imfs_create_file(filename);
+        create_file(filename);
         file_idx = find_file_index(filename);
     }
 

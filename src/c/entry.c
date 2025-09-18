@@ -10,9 +10,22 @@
 #define VGA_HEIGHT 25
 #define COLORS 0x4 << 4 
 
+enum kernel_mode {
+    MODE_NORMAL,     // shell
+    MODE_EDITOR,
+    MODE_SCREENSAVER
+};
+
 static unsigned short current_cursor_pos = 0;
 static unsigned short inactivity_counter = 0;
 static const u32 SCREENSAVER_TIMEOUT_TICKS = 360;
+static enum kernel_mode current_mode = MODE_NORMAL;
+
+static char editor_buffer[MAX_FILE_CONTENT_LENGTH + 1];
+static u32 editor_buffer_idx = 0;
+static u32 editor_cursor_x = 0;
+static u32 editor_cursor_y = 0;
+static char editor_filename[MAX_FILENAME_LENGTH + 1];
 
 void scroll_screen(); 
 void print_char(char c); 
@@ -22,7 +35,6 @@ void clear_screen();
 #define MAX_COMMAND_LENGTH 256
 static char command_buffer[MAX_COMMAND_LENGTH];
 static u32 command_buffer_idx = 0;
-static bool screensaver_active = false; 
 
 void execute_command(char *command_line); 
 void init_shell_prompt(); 
@@ -131,15 +143,16 @@ void execute_command(char *command_line) {
     } else if (strcmp(command, "clear") == 0 || strcmp(command, "cls") == 0) {
         clear_screen();
     } else if (strcmp(command, "help") == 0 || strcmp(command, "man") == 0) {
-        print_string("o help - You're here!\n");
-        print_string("  clear\n");
-        print_string("  sleep\n");
-        print_string("  ls\n");
-        print_string("  create <file_name>\n");
-        print_string("  write <file_name> <content>\n");
-        print_string("  read <file_name>\n");
-        print_string("  delete <file_name>\n");
-        print_string("  say <text>\n");
+        print_string(" o help - You're here!\n");
+        print_string("   clear\n");
+        print_string("   sleep\n");
+        print_string("   ls\n");
+        print_string("   create <file_name>\n");
+        print_string("   write <file_name> <content>\n");
+        print_string("   edit <file_name>\n");
+        print_string("   read <file_name>\n");
+        print_string("   delete <file_name>\n");
+        print_string("   say <text>\n");
     } else if (strcmp(command, "sleep") == 0 || strcmp(command, "gn") == 0) {
         activate_screensaver();
     }
@@ -149,7 +162,7 @@ void execute_command(char *command_line) {
         if (arg1 == NULL) {
             print_string("say 'help'\n");
         } else {
-            if (imfs_create_file(arg1) == 0) {
+            if (create_file(arg1) == 0) {
                 print_string("File '");
                 print_string(arg1);
                 print_string("' created.\n");
@@ -173,7 +186,20 @@ void execute_command(char *command_line) {
                 print_string("'.\n");
             }
         }
-    } else if (strcmp(command, "read") == 0 || strcmp(command, "cat") == 0) {
+    } else if (strcmp(command, "edit") == 0 || strcmp(command, "v") == 0) {
+        if (arg1 == NULL) {
+            print_string("say 'help'\n");
+        } else if (strlen_custom(arg1) > MAX_FILENAME_LENGTH) {
+            print_string("Error: Filename too long. Max 32 chars).\n");
+        } else {
+            const char *initial_content = read_file(arg1);
+            if (initial_content == NULL) {
+                initial_content = "\n";
+            }
+            editor_init(arg1, initial_content);
+        }
+    }
+    else if (strcmp(command, "read") == 0 || strcmp(command, "cat") == 0) {
         if (arg1 == NULL) {
             print_string("say 'help'\n");
         } else {
@@ -214,7 +240,9 @@ void execute_command(char *command_line) {
 }
 
 void init_shell_prompt() {
-    print_string("\n$ ");
+    if (current_mode != MODE_NORMAL) {return;}
+
+    print_string("\n > ");
     for (u32 i = 0; i < command_buffer_idx; i++) {
         print_char(command_buffer[i]);
     }
@@ -222,44 +250,77 @@ void init_shell_prompt() {
 
 void init_shell() {
     clear_screen();
-    print_string("\n >< '> lle fish au chocolat\n");
+    print_string("\n >< '>   le fish au chocolat \n");
     init_shell_prompt();
     command_buffer_idx = 0;
 }
 
 void key_handler(struct keyboard_event event) {
-    if (event.type == EVENT_KEY_PRESSED) {
-        inactivity_counter = 0;
-        if (screensaver_active) {
-            screensaver_active = false;
-            clear_screen();
-            init_shell_prompt();
-            return;
-        }
-        if (event.key_character >= ' ' && event.key_character <= '~' && command_buffer_idx < MAX_COMMAND_LENGTH - 1) {
-            command_buffer[command_buffer_idx++] = event.key_character;
-            print_char(event.key_character);
-        } else if (event.key == KEY_BACKSPACE) {
-            if (command_buffer_idx > 0) {
-                command_buffer_idx--;
-                print_char('\b');
+    switch (current_mode) {
+        case MODE_SCREENSAVER:
+            if (event.type == EVENT_KEY_PRESSED) {
+                inactivity_counter = 0;
+                current_mode = MODE_NORMAL;
+                out(0x3D4, 0x0A); 
+                out(0x3D5, 0x0E); // show cursor
+                clear_screen();
+                init_shell_prompt();
+            } 
+        break;
+
+        case MODE_EDITOR:
+            if (event.type == EVENT_KEY_PRESSED) {
+                if (event.key == KEY_ESC) {
+                    editor_exit();
+                } else if (event.key == KEY_F2) {
+                    if (strlen_custom(editor_filename) > 0) {
+                        if (write_file(editor_filename, editor_buffer) == 0) {
+                            // cool
+                        } else {
+                            // error
+                        }
+                    } else {
+                        // no save name
+                    }
+                    editor_exit();
+                } else if (event.key == KEY_BACKSPACE) {
+                    editor_put_char('\b');
+                } else if (event.key == KEY_ENTER) {
+                    editor_put_char('\n');
+                } else if (event.key == KEY_TAB) {
+                    editor_put_char('\t');
+                } else if (event.key_character >= ' ' && event.key_character <= '~') {
+                    editor_put_char(event.key_character);
+                }
             }
-        }
-    } else if (event.type == EVENT_KEY_RELEASED) {
-        if (event.key == KEY_ENTER) {
-            print_char('\n');
-            command_buffer[command_buffer_idx] = '\0';
-            execute_command(command_buffer);
-            command_buffer_idx = 0;
-            init_shell_prompt();
-        }
+        break;
+
+        case MODE_NORMAL:
+            if (event.type == EVENT_KEY_PRESSED) {
+                if (event.key_character >= ' ' && event.key_character <= '~' && command_buffer_idx < MAX_COMMAND_LENGTH - 1) {
+                    command_buffer[command_buffer_idx++] = event.key_character;
+                    print_char(event.key_character);
+                } else if (event.key == KEY_BACKSPACE) {
+                    if (command_buffer_idx > 0) {
+                        command_buffer_idx--;
+                        print_char('\b');
+                    }
+                } else if (event.key == KEY_ENTER) {
+                    print_char('\n');
+                    command_buffer[command_buffer_idx] = '\0';
+                    execute_command(command_buffer);
+                    command_buffer_idx = 0;
+                    init_shell_prompt();
+                }
+            }
+        break;
     }
 }
 
 void timer_tick_handler() {
-    if (screensaver_active) {
+    if (current_mode == MODE_SCREENSAVER) {
         
-    } else {
+    } else if (current_mode == MODE_NORMAL) {
         inactivity_counter++;
         if (inactivity_counter >= SCREENSAVER_TIMEOUT_TICKS) {
             activate_screensaver();
@@ -269,7 +330,7 @@ void timer_tick_handler() {
 }
 
 void activate_screensaver() {
-    screensaver_active = true;
+    current_mode = MODE_SCREENSAVER;
 
     // hide the cursor
     out(0x3D4, 0x0A);
@@ -298,7 +359,139 @@ void kernel_entry() {
     halt_loop();
 }
 
+static void editor_update_hw_cursor() {
+    put_cursor(editor_cursor_y * VGA_WIDTH + editor_cursor_x);
+}
+
+void editor_init(const char *filename, const char *initial_content) {
+    current_mode = MODE_EDITOR;
+    strcpy_custom(editor_filename, filename);
+
+    editor_buffer[0] = '\0';
+    editor_buffer_idx = 0;
+    if (initial_content != NULL) {
+        u32 content_len = strlen_custom(initial_content);
+        if (content_len > MAX_FILE_CONTENT_LENGTH) {
+            content_len = MAX_FILE_CONTENT_LENGTH;
+        }
+        for(u32 i = 0; i < content_len; i++) {
+            editor_buffer[i] = initial_content[i];
+        }
+        editor_buffer[content_len] = '\0';
+        editor_buffer_idx = content_len;
+    }
+
+    editor_refresh_screen();
+}
+
+void editor_refresh_screen() {
+    clear_screen();
+    char *framebuffer = (char *)VGA_ADDRESS;
+    u32 screen_x = 0;
+    u32 screen_y = 0;
+
+    u32 target_cursor_screen_x = 0;
+    u32 target_cursor_screen_y = 0;
+
+    u32 buffer_len = strlen_custom(editor_buffer);
+
+    for (u32 i = 0; i <= buffer_len; i++) {
+        if (i == editor_buffer_idx) {
+            target_cursor_screen_x = screen_x;
+            target_cursor_screen_y = screen_y;
+        }
+
+        if (i == buffer_len) {
+            break;
+        }
+
+        char c = editor_buffer[i];
+
+        if (c == '\n') {
+            screen_x = 0;
+            screen_y++;
+        } else if (c == '\t') {
+            u32 tab_stop = 4;
+            screen_x = (screen_x + tab_stop) & ~(tab_stop - 1);
+            if (screen_x >= VGA_WIDTH) {
+                screen_x -= VGA_WIDTH;
+                screen_y++;
+            }
+        } else {
+            if (screen_y < VGA_HEIGHT) {
+                framebuffer[(screen_y * VGA_WIDTH + screen_x) * 2] = c;
+                framebuffer[(screen_y * VGA_WIDTH + screen_x) * 2 + 1] = COLORS;
+            }
+            screen_x++;
+            if (screen_x >= VGA_WIDTH) {
+                screen_x = 0;
+                screen_y++;
+            }
+        }
+
+        if (screen_y >= VGA_HEIGHT) {
+            screen_y = VGA_HEIGHT - 1;
+        }
+    }
+
+    editor_cursor_x = target_cursor_screen_x;
+    editor_cursor_y = target_cursor_screen_y;
+
+    editor_update_hw_cursor();
+}
+
+void editor_put_char(char c) {
+    u32 current_buffer_len = strlen_custom(editor_buffer);
+
+    if (c == '\b') {
+        if (editor_buffer_idx > 0) {    
+            editor_buffer_idx--;
+            for (u32 i = editor_buffer_idx; i < current_buffer_len; i++) {
+                editor_buffer[i] = editor_buffer[i + 1];
+            }
+            editor_buffer[current_buffer_len - 1] = '\0';
+        }
+    } else if (c == '\t') {
+        if (current_buffer_len + 4 <= MAX_FILE_CONTENT_LENGTH) {
+            for (u32 i = current_buffer_len; i >= editor_buffer_idx; i--) {
+                editor_buffer[i + 4] = editor_buffer[i];
+            }
+            editor_buffer[editor_buffer_idx++] = ' ';
+            editor_buffer[editor_buffer_idx++] = ' ';
+            editor_buffer[editor_buffer_idx++] = ' ';
+            editor_buffer[editor_buffer_idx++] = ' ';
+            editor_buffer[current_buffer_len + 4] = '\0';
+        }
+    } else if (current_buffer_len < MAX_FILE_CONTENT_LENGTH) {
+        for (u32 i = current_buffer_len; i >= editor_buffer_idx; i--) {
+            editor_buffer[i + 1] = editor_buffer[i];
+        }
+        editor_buffer[editor_buffer_idx++] = c;
+        editor_buffer[current_buffer_len + 1] = '\0';
+    }
+
+    editor_refresh_screen();
+}
+
+void editor_exit() {
+    current_mode = MODE_NORMAL;
+    editor_buffer[0] = '\0';
+    editor_buffer_idx = 0;
+    editor_cursor_x = 0;
+    editor_cursor_y = 0;
+    editor_filename[0] = '\0';
+
+    // show cursor
+    out(0x3D4, 0x0A);
+    out(0x3D5, 0x0E);
+
+    clear_screen();
+    init_shell_prompt();
+}
+
+
 // TODO
 // 1. Animate screensaver
-// 2. File editor
+//// 2. File editor
+//    2.1 fix editor weird bug
 // 3. Remember the screen before screensaving

@@ -101,7 +101,6 @@ char key_to_character[SCANCODES_KNOWN];
 
 void (*custom_key_handler)(struct keyboard_event event) = 0;
 
-/* Handles the keyboard interrupt */
 void keyboard_handler(__attribute__((unused)) u32 interrupt) {
     const u8 scancode = in(KEYBOARD_DATA_PORT);
     if (custom_key_handler != 0) {

@@ -117,7 +117,7 @@ char *exception_messages[] = {
 
 struct eh_stack_state {
     u32 gs, fs, es, ds;                         // pushed directly by common stub
-    u32 edi, esi, ebp, esp, ebx, edx, ecx, eax; // pusha in common stub
+    u32 edi, esi, ebp, esp, ebx, edx, ecx, eax; // pushed in common stub
     u32 interrupt, error;                       // pushed by concrete routine
     u32 eip, cs, eflags, useresp, ss;           // automatically pushed by cpu
 };

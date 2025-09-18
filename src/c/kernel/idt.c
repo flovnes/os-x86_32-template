@@ -2,9 +2,6 @@
 
 #define IDT_SIZE 512
 
-/**
- * Loads IDT pointing to the memory address given.
- */
 extern void load_idt(void *idt_address);
 
 struct idt_entry {

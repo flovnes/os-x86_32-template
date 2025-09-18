@@ -5,7 +5,6 @@
 #define VGA_HEIGHT 25
 #define DEFAULT_COLOR  ((0x0 << 4) | 0xa)
 
-
 typedef unsigned char u8;
 typedef unsigned short u16;
 typedef unsigned int u32;

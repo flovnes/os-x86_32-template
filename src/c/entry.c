@@ -8,7 +8,7 @@
 #define VGA_ADDRESS 0xb8000
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
-#define COLORS 0x4 << 4 
+#define COLORS 0x4 << 4
 
 enum kernel_mode {
     MODE_NORMAL,     // shell
@@ -19,6 +19,7 @@ enum kernel_mode {
 static unsigned short current_cursor_pos = 0;
 static unsigned short inactivity_counter = 0;
 static const u32 SCREENSAVER_TIMEOUT_TICKS = 360;
+static u32 timer_ticks = 0;
 static enum kernel_mode current_mode = MODE_NORMAL;
 
 static char editor_buffer[MAX_FILE_CONTENT_LENGTH + 1];
@@ -26,6 +27,11 @@ static u32 editor_buffer_idx = 0;
 static u32 editor_cursor_x = 0;
 static u32 editor_cursor_y = 0;
 static char editor_filename[MAX_FILENAME_LENGTH + 1];
+
+static u32 screensaver_string_x = 0;
+static u32 screensaver_string_y = 0;
+static u8 screensaver_color_idx = 0;
+static const char *screensaver_string = ">< '>";
 
 void scroll_screen(); 
 void print_char(char c); 
@@ -318,8 +324,33 @@ void key_handler(struct keyboard_event event) {
 }
 
 void timer_tick_handler() {
+    timer_ticks++;
     if (current_mode == MODE_SCREENSAVER) {
-        
+        // if (timer_ticks % 18 != 0) {return;}
+        char *framebuffer = (char *)VGA_ADDRESS;
+        u32 pattern_len = strlen_custom(screensaver_string);
+
+        u32 prev_pattern_offset = screensaver_string_y * VGA_WIDTH * 2 + screensaver_string_x * 2;
+        for (u32 i = 0; i < pattern_len; i++) {
+            if (screensaver_string_x + i < VGA_WIDTH && screensaver_string_y < VGA_HEIGHT) {
+                framebuffer[prev_pattern_offset + i * 2] = ' '; 
+                framebuffer[prev_pattern_offset + i * 2 + 1] = COLORS; 
+            }
+        }
+
+        screensaver_string_x++;
+        if (screensaver_string_x >= VGA_WIDTH) { 
+            screensaver_string_x = 0; 
+        }
+
+        u32 current_pattern_offset = screensaver_string_y * VGA_WIDTH * 2 + screensaver_string_x * 2;
+        for (u32 i = 0; i < pattern_len; i++) {
+            if (screensaver_string_x + i < VGA_WIDTH && screensaver_string_y < VGA_HEIGHT) {
+                framebuffer[current_pattern_offset + i * 2] = screensaver_string[i];
+                framebuffer[current_pattern_offset + i * 2 + 1] = COLORS; 
+            }
+        }
+
     } else if (current_mode == MODE_NORMAL) {
         inactivity_counter++;
         if (inactivity_counter >= SCREENSAVER_TIMEOUT_TICKS) {
@@ -331,21 +362,24 @@ void timer_tick_handler() {
 
 void activate_screensaver() {
     current_mode = MODE_SCREENSAVER;
-
-    // hide the cursor
+    clear_screen(); 
     out(0x3D4, 0x0A);
-    out(0x3D5, 0x20); 
+    out(0x3D5, 0x20);
+
+    screensaver_string_x = 0;
+    screensaver_string_y = VGA_HEIGHT / 2; 
+    screensaver_color_idx = 1; 
 
     char *framebuffer = (char *)VGA_ADDRESS;
 
-    clear_screen();
-    const char *message = "good night.";
+    const char *message = " good night. ";
     unsigned short msg_len = 0;
     while(message[msg_len] != '\0') msg_len++;
 
-    unsigned short start_pos = (VGA_WIDTH * (VGA_HEIGHT / 2)) + (VGA_WIDTH / 2) - (msg_len/2+1);
+    unsigned short start_pos = (VGA_WIDTH * (VGA_HEIGHT / 2)) + (VGA_WIDTH / 2) - (msg_len / 2 + 1); 
     for (unsigned short i = 0; i < msg_len; i++) {
         framebuffer[(start_pos + i) * 2] = message[i];
+        framebuffer[(start_pos + i) * 2 + 1] = COLORS;
     }
 }
 

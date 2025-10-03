@@ -3,6 +3,7 @@
 #define VGA_ADDRESS 0xb8000
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
+#define COLORS 0xa
 
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -12,7 +13,6 @@ typedef unsigned char bool;
 #define true 1
 #define false 0
 
-// TODO: ensure has the same value as defined in GDT.
 #define KERNEL_CODE_SEGMENT 0x08
 #define INTERRUPT_TIMER 0
 #define INTERRUPT_KEYBOARD 1

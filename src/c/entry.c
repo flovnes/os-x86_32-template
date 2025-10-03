@@ -5,13 +5,8 @@
 #include "drivers/file_system/file_system.h"
 #include <stdbool.h> 
 
-#define VGA_ADDRESS 0xb8000
-#define VGA_WIDTH 80
-#define VGA_HEIGHT 25
-#define COLORS 0x4 << 4
-
 enum kernel_mode {
-    MODE_NORMAL,     // shell
+    MODE_NORMAL,
     MODE_EDITOR,
     MODE_SCREENSAVER
 };
@@ -28,10 +23,26 @@ static u32 editor_cursor_x = 0;
 static u32 editor_cursor_y = 0;
 static char editor_filename[MAX_FILENAME_LENGTH + 1];
 
-static u32 screensaver_string_x = 0;
-static u32 screensaver_string_y = 0;
+static int screensaver_string_x = 0;
+static int screensaver_string_y = 0;
+static int screensaver_dx = 1;
+static int screensaver_dy = 1;
 static u8 screensaver_color_idx = 0;
-static const char *screensaver_string = ">< '>";
+static const char *screensaver_string_right = ">< '>";
+static const char *screensaver_string_left  = "<' ><";
+
+static const char *hat_string_right = "  @ ";
+static const char *hat_string_left  = " @  ";
+
+static const u8 screensaver_colors[] = {
+    0x0E, // yellow
+    0x0A, // green
+    0x0B, // blue
+    0x0C, // red
+    0x0D, // pink
+    0x0F, // white
+};
+static const u32 num_screensaver_colors = sizeof(screensaver_colors) / sizeof(screensaver_colors[0]);
 
 void scroll_screen(); 
 void print_char(char c); 
@@ -87,7 +98,7 @@ void scroll_screen() {
 void print_char(char c) {
     char *framebuffer = (char *)VGA_ADDRESS;
     if (c == '\n') {
-        current_cursor_pos = (current_cursor_pos / VGA_WIDTH + 1) * VGA_WIDTH; // a/n+1, a<=n
+        current_cursor_pos = (current_cursor_pos / VGA_WIDTH + 1) * VGA_WIDTH;
     } else if (c == '\b') {
         if (current_cursor_pos > 0) {
             current_cursor_pos--;
@@ -149,24 +160,24 @@ void execute_command(char *command_line) {
     } else if (strcmp(command, "clear") == 0 || strcmp(command, "cls") == 0) {
         clear_screen();
     } else if (strcmp(command, "help") == 0 || strcmp(command, "man") == 0) {
-        print_string(" o help - You're here!\n");
-        print_string("   clear\n");
-        print_string("   sleep\n");
-        print_string("   ls\n");
-        print_string("   create <file_name>\n");
-        print_string("   write <file_name> <content>\n");
-        print_string("   edit <file_name>\n");
-        print_string("   read <file_name>\n");
-        print_string("   delete <file_name>\n");
-        print_string("   say <text>\n");
+        print_string("  o help - You're here!\n");
+        print_string("    clear\n");
+        print_string("    sleep\n");
+        print_string("    ls\n");
+        print_string("    create <file_name>\n");
+        print_string("    write <file_name> <content>\n");
+        print_string("    edit <file_name>\n");
+        print_string("    read <file_name>\n");
+        print_string("    delete <file_name>\n");
+        print_string("    say <text>\n");
     } else if (strcmp(command, "sleep") == 0 || strcmp(command, "gn") == 0) {
         activate_screensaver();
     }
     else if (strcmp(command, "ls") == 0) {
-        imfs_list_files();
+        list_files();
     } else if (strcmp(command, "create") == 0 || strcmp(command, "touch") == 0) {
         if (arg1 == NULL) {
-            print_string("say 'help'\n");
+            print_string("? say 'help'\n");
         } else {
             if (create_file(arg1) == 0) {
                 print_string("File '");
@@ -180,7 +191,7 @@ void execute_command(char *command_line) {
         }
     } else if (strcmp(command, "write") == 0) {
         if (arg1 == NULL || arg2 == NULL) {
-            print_string("say 'help'\n");
+            print_string("? say 'help'\n");
         } else {
             if (write_file(arg1, arg2) == 0) {
                 print_string("Content written to '");
@@ -194,7 +205,7 @@ void execute_command(char *command_line) {
         }
     } else if (strcmp(command, "edit") == 0 || strcmp(command, "v") == 0) {
         if (arg1 == NULL) {
-            print_string("say 'help'\n");
+            print_string("? say 'help'\n");
         } else if (strlen_custom(arg1) > MAX_FILENAME_LENGTH) {
             print_string("Error: Filename too long. Max 32 chars).\n");
         } else {
@@ -207,7 +218,7 @@ void execute_command(char *command_line) {
     }
     else if (strcmp(command, "read") == 0 || strcmp(command, "cat") == 0) {
         if (arg1 == NULL) {
-            print_string("say 'help'\n");
+            print_string("? say 'help'\n");
         } else {
             const char *content = read_file(arg1);
             if (content != NULL) {
@@ -221,7 +232,7 @@ void execute_command(char *command_line) {
         }
     } else if (strcmp(command, "delete") == 0 || strcmp(command, "rm") == 0) {
         if (arg1 == NULL) {
-            print_string("say 'help'\n");
+            print_string("? say 'help'\n");
         } else {
             if (delete_file(arg1) == 0) {
                 print_string("File '");
@@ -241,7 +252,7 @@ void execute_command(char *command_line) {
         print_char('\n');
     }
     else {
-        print_string("\n  ? Unknown command\n");
+        print_string("\n  ? say 'help'\n");
     }
 }
 
@@ -268,7 +279,7 @@ void key_handler(struct keyboard_event event) {
                 inactivity_counter = 0;
                 current_mode = MODE_NORMAL;
                 out(0x3D4, 0x0A); 
-                out(0x3D5, 0x0E); // show cursor
+                out(0x3D5, 0x0E);
                 clear_screen();
                 init_shell_prompt();
             } 
@@ -326,28 +337,74 @@ void key_handler(struct keyboard_event event) {
 void timer_tick_handler() {
     timer_ticks++;
     if (current_mode == MODE_SCREENSAVER) {
-        // if (timer_ticks % 18 != 0) {return;}
-        char *framebuffer = (char *)VGA_ADDRESS;
-        u32 pattern_len = strlen_custom(screensaver_string);
+        if (timer_ticks % 2 != 0) {
+            return;
+        }
 
-        u32 prev_pattern_offset = screensaver_string_y * VGA_WIDTH * 2 + screensaver_string_x * 2;
+        char *framebuffer = (char *)VGA_ADDRESS;
+        u32 pattern_len = strlen_custom(screensaver_string_right);
+        u8 current_color_attribute = (0x0 << 4) | screensaver_colors[screensaver_color_idx];
+
+         u32 old_fish_offset = (screensaver_string_y * VGA_WIDTH + screensaver_string_x) * 2;
+        if (screensaver_string_y > 0) {
+            u32 old_hat_offset = ((screensaver_string_y - 1) * VGA_WIDTH + screensaver_string_x) * 2;
+            for (u32 i = 0; i < pattern_len; i++) {
+                if (screensaver_string_x + i < VGA_WIDTH) {
+                    framebuffer[old_hat_offset + i * 2] = ' ';
+                }
+            }
+        }
         for (u32 i = 0; i < pattern_len; i++) {
-            if (screensaver_string_x + i < VGA_WIDTH && screensaver_string_y < VGA_HEIGHT) {
-                framebuffer[prev_pattern_offset + i * 2] = ' '; 
-                framebuffer[prev_pattern_offset + i * 2 + 1] = COLORS; 
+            if (screensaver_string_x + i < VGA_WIDTH) {
+                framebuffer[old_fish_offset + i * 2] = ' ';
+                framebuffer[old_fish_offset + i * 2 + 1] = COLORS;
             }
         }
 
-        screensaver_string_x++;
-        if (screensaver_string_x >= VGA_WIDTH) { 
-            screensaver_string_x = 0; 
+        screensaver_string_x += screensaver_dx;
+        screensaver_string_y += screensaver_dy;
+
+        bool bounced = false;
+        if (screensaver_string_x <= 0) {
+            screensaver_string_x = 0;
+            screensaver_dx = 1;
+            bounced = true;
+        } else if (screensaver_string_x + pattern_len >= VGA_WIDTH) {
+            screensaver_string_x = VGA_WIDTH - pattern_len;
+            screensaver_dx = -1;
+            bounced = true;
         }
 
-        u32 current_pattern_offset = screensaver_string_y * VGA_WIDTH * 2 + screensaver_string_x * 2;
+        if (screensaver_string_y <= 0) { 
+            screensaver_string_y = 1;
+            screensaver_dy = 1;
+            bounced = true;
+        } else if (screensaver_string_y >= VGA_HEIGHT - 1) {
+            screensaver_string_y = VGA_HEIGHT - 1;
+            screensaver_dy = -1;
+            bounced = true;
+        }
+        
+        if (bounced) {
+            screensaver_color_idx = (screensaver_color_idx + 1) % num_screensaver_colors;
+        }
+
+        const char *current_fish_string = (screensaver_dx == -1) ? screensaver_string_right : screensaver_string_left;
+        const char *current_hat_string = (screensaver_dx == -1) ? hat_string_right : hat_string_left;
+        
+        u32 new_hat_offset = ((screensaver_string_y - 1) * VGA_WIDTH + screensaver_string_x) * 2;
         for (u32 i = 0; i < pattern_len; i++) {
-            if (screensaver_string_x + i < VGA_WIDTH && screensaver_string_y < VGA_HEIGHT) {
-                framebuffer[current_pattern_offset + i * 2] = screensaver_string[i];
-                framebuffer[current_pattern_offset + i * 2 + 1] = COLORS; 
+            if (screensaver_string_x + i < VGA_WIDTH) {
+                framebuffer[new_hat_offset + i * 2] = current_hat_string[i];
+                framebuffer[new_hat_offset + i * 2 + 1] = current_color_attribute; 
+            }
+        }
+
+        u32 new_fish_offset = (screensaver_string_y * VGA_WIDTH + screensaver_string_x) * 2;
+        for (u32 i = 0; i < pattern_len; i++) {
+            if (screensaver_string_x + i < VGA_WIDTH) {
+                framebuffer[new_fish_offset + i * 2] = current_fish_string[i];
+                framebuffer[new_fish_offset + i * 2 + 1] = current_color_attribute; 
             }
         }
 
@@ -366,21 +423,11 @@ void activate_screensaver() {
     out(0x3D4, 0x0A);
     out(0x3D5, 0x20);
 
-    screensaver_string_x = 0;
+    screensaver_string_x = VGA_WIDTH / 2;
     screensaver_string_y = VGA_HEIGHT / 2; 
-    screensaver_color_idx = 1; 
-
-    char *framebuffer = (char *)VGA_ADDRESS;
-
-    const char *message = " good night. ";
-    unsigned short msg_len = 0;
-    while(message[msg_len] != '\0') msg_len++;
-
-    unsigned short start_pos = (VGA_WIDTH * (VGA_HEIGHT / 2)) + (VGA_WIDTH / 2) - (msg_len / 2 + 1); 
-    for (unsigned short i = 0; i < msg_len; i++) {
-        framebuffer[(start_pos + i) * 2] = message[i];
-        framebuffer[(start_pos + i) * 2 + 1] = COLORS;
-    }
+    screensaver_dx = 1;
+    screensaver_dy = 1;
+    screensaver_color_idx = 0; 
 }
 
 void kernel_entry() {

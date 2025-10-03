@@ -1,17 +1,17 @@
 #include "file_system.h"
-#include "../../kernel/kernel.h"
-#include "../serial_port/serial_port.h"
+#include "../kernel/kernel.h"
+#include "../drivers/serial_port/serial_port.h"
 #include <stdbool.h>
 #include <stddef.h>
 
-static struct imfs_file imfs_files[MAX_FILES];
+static struct fs_file fs_files[MAX_FILES];
 
-void init_imfs() {
+void init_file_system() {
     for (int i = 0; i < MAX_FILES; i++) {
-        imfs_files[i].in_use = false;
-        imfs_files[i].name[0] = '\0';
-        imfs_files[i].content[0] = '\0';
-        imfs_files[i].size = 0;
+        fs_files[i].in_use = false;
+        fs_files[i].name[0] = '\0';
+        fs_files[i].content[0] = '\0';
+        fs_files[i].size = 0;
     }
 }
 
@@ -64,7 +64,7 @@ char* str_split(char* str, const char* delim) {
 
 int find_file_index(const char *filename) {
     for (int i = 0; i < MAX_FILES; i++) {
-        if (imfs_files[i].in_use && strcmp(imfs_files[i].name, filename) == 0) {
+        if (fs_files[i].in_use && strcmp(fs_files[i].name, filename) == 0) {
             return i;
         }
     }
@@ -73,7 +73,7 @@ int find_file_index(const char *filename) {
 
 int find_free_file_index() {
     for (int i = 0; i < MAX_FILES; i++) {
-        if (!imfs_files[i].in_use) {
+        if (!fs_files[i].in_use) {
             return i;
         }
     }
@@ -92,7 +92,7 @@ int create_file(const char *filename) {
         return -1;
     }
 
-    struct imfs_file *file = &imfs_files[free_idx];
+    struct fs_file *file = &fs_files[free_idx];
     strcpy_custom(file->name, filename);
     file->content[0] = '\0'; 
     file->size = 0;
@@ -112,7 +112,7 @@ int write_file(const char *filename, const char *data) {
         file_idx = find_file_index(filename);
     }
 
-    struct imfs_file *file = &imfs_files[file_idx];
+    struct fs_file *file = &fs_files[file_idx];
     strcpy_custom(file->content, data);
     file->size = data_len;
     return 0;
@@ -123,7 +123,7 @@ const char* read_file(const char *filename) {
     if (file_idx == -1) {
         return NULL;
     }
-    return imfs_files[file_idx].content;
+    return fs_files[file_idx].content;
 }
 
 int delete_file(const char *filename) {
@@ -132,7 +132,7 @@ int delete_file(const char *filename) {
         return -1;
     }
 
-    struct imfs_file *file = &imfs_files[file_idx];
+    struct fs_file *file = &fs_files[file_idx];
     file->in_use = false;
     file->name[0] = '\0';    
     file->content[0] = '\0'; 
@@ -143,11 +143,11 @@ int delete_file(const char *filename) {
 void list_files() {
     bool found_files = false;
     for (int i = 0; i < MAX_FILES; i++) {
-        if (imfs_files[i].in_use) {
-            print_string(imfs_files[i].name);
+        if (fs_files[i].in_use) {
+            print_string(fs_files[i].name);
             print_string(" (");
             char size_str[12]; 
-            u32 temp_size = imfs_files[i].size;
+            u32 temp_size = fs_files[i].size;
             int j = 0;
             if (temp_size == 0) {
                 size_str[j++] = '0';

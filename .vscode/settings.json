@@ -4,6 +4,7 @@
         "file_system.h": "c",
         "stddef.h": "c",
         "stdbool.h": "c",
-        "serial_port.h": "c"
+        "serial_port.h": "c",
+        "console.h": "c"
     }
 }

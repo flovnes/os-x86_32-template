@@ -2,13 +2,10 @@
 #include "drivers/keyboard/keyboard.h"
 #include "drivers/timer/timer.h"
 #include "drivers/serial_port/serial_port.h"
-#include "drivers/file_system/file_system.h"
+#include "file_system.h"
+#include "text_buffer.h"
+#include "string.h"
 #include <stdbool.h> 
-
-#define VGA_ADDRESS 0xb8000
-#define VGA_WIDTH 80
-#define VGA_HEIGHT 25
-#define COLORS 0x4 << 4
 
 enum kernel_mode {
     MODE_NORMAL,     // shell
@@ -22,8 +19,8 @@ static const u32 SCREENSAVER_TIMEOUT_TICKS = 360;
 static u32 timer_ticks = 0;
 static enum kernel_mode current_mode = MODE_NORMAL;
 
-static char editor_buffer[MAX_FILE_CONTENT_LENGTH + 1];
-static u32 editor_buffer_idx = 0;
+static char editor_storage[MAX_FILE_CONTENT_LENGTH + 1];
+static TextBuffer editor_tb;
 static u32 editor_cursor_x = 0;
 static u32 editor_cursor_y = 0;
 static char editor_filename[MAX_FILENAME_LENGTH + 1];
@@ -37,10 +34,44 @@ void scroll_screen();
 void print_char(char c); 
 void print_string(const char *s); 
 void clear_screen(); 
+void activate_screensaver();
+void editor_init(const char *filename, const char *initial_content);
+void editor_refresh_screen();
+void editor_put_char(char c);
+void editor_exit();
+
+#define MAX_ALLOCS 16
+struct alloc { bool in_use; u32 id; u32 size; };
+static struct alloc allocs[MAX_ALLOCS];
+static u32 next_id = 1;
+
+static void print_u32_dec(u32 value) {
+    char buf[12];
+    int i = 0;
+    if (value == 0) { buf[i++] = '0'; }
+    while (value > 0) { buf[i++] = (value % 10) + '0'; value /= 10; }
+    for (int j = i - 1; j >= 0; j--) { print_char(buf[j]); }
+}
+
+static bool parse_u32_dec(const char *s, u32 *out_value) {
+    if (s == NULL || *s == '\0') { return false; }
+    u32 value = 0;
+    const char *p = s;
+    while (*p) {
+        if (*p < '0' || *p > '9') { return false; }
+        u32 digit = (u32)(*p - '0');
+        u32 new_value = value * 10 + digit;
+        if (new_value < value) { return false; }
+        value = new_value;
+        p++;
+    }
+    *out_value = value;
+    return true;
+}
 
 #define MAX_COMMAND_LENGTH 256
-static char command_buffer[MAX_COMMAND_LENGTH];
-static u32 command_buffer_idx = 0;
+static char command_storage[MAX_COMMAND_LENGTH];
+static TextBuffer command_tb;
 
 void execute_command(char *command_line); 
 void init_shell_prompt(); 
@@ -126,14 +157,6 @@ _Noreturn void halt_loop() {
     while (1) { halt(); }
 }
 
-int strcmp(const char *s1, const char *s2) {
-    while (*s1 && (*s1 == *s2)) {
-        s1++;
-        s2++;
-    }
-    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
-}
-
 void execute_command(char *command_line) {
     inactivity_counter = 0;
 
@@ -159,11 +182,54 @@ void execute_command(char *command_line) {
         print_string("   read <file_name>\n");
         print_string("   delete <file_name>\n");
         print_string("   say <text>\n");
+        print_string("   malloc <size>\n");
+        print_string("   free <id>\n");
     } else if (strcmp(command, "sleep") == 0 || strcmp(command, "gn") == 0) {
         activate_screensaver();
     }
+    else if (strcmp(command, "malloc") == 0) {
+        u32 size = 0;
+        if (!parse_u32_dec(arg1, &size)) {
+            print_string("Usage: malloc <size>\n");
+        } else {
+            int slot = -1;
+            for (int i = 0; i < MAX_ALLOCS; i++) { if (!allocs[i].in_use) { slot = i; break; } }
+            if (slot == -1) {
+                print_string("No slots left\n");
+            } else {
+                allocs[slot].in_use = true;
+                allocs[slot].id = next_id++;
+                allocs[slot].size = size;
+                print_string("id=");
+                print_u32_dec(allocs[slot].id);
+                print_string(" size=");
+                print_u32_dec(size);
+                print_char('\n');
+            }
+        }
+    }
+    else if (strcmp(command, "free") == 0) {
+        u32 id = 0;
+        if (!parse_u32_dec(arg1, &id)) {
+            print_string("say 'help'\n");
+        } else {
+            bool found = false;
+            for (int i = 0; i < MAX_ALLOCS; i++) {
+                if (allocs[i].in_use && allocs[i].id == id) {
+                    allocs[i].in_use = false;
+                    allocs[i].id = 0;
+                    allocs[i].size = 0;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                print_string("Unknown id\n");
+            }
+        }
+    }
     else if (strcmp(command, "ls") == 0) {
-        imfs_list_files();
+        fs_list_files();
     } else if (strcmp(command, "create") == 0 || strcmp(command, "touch") == 0) {
         if (arg1 == NULL) {
             print_string("say 'help'\n");
@@ -249,16 +315,14 @@ void init_shell_prompt() {
     if (current_mode != MODE_NORMAL) {return;}
 
     print_string("\n > ");
-    for (u32 i = 0; i < command_buffer_idx; i++) {
-        print_char(command_buffer[i]);
-    }
+    print_string(command_tb.data);
 }
 
 void init_shell() {
     clear_screen();
     print_string("\n >< '>   le fish au chocolat \n");
     init_shell_prompt();
-    command_buffer_idx = 0;
+    tb_clear(&command_tb);
 }
 
 void key_handler(struct keyboard_event event) {
@@ -280,7 +344,7 @@ void key_handler(struct keyboard_event event) {
                     editor_exit();
                 } else if (event.key == KEY_F2) {
                     if (strlen_custom(editor_filename) > 0) {
-                        if (write_file(editor_filename, editor_buffer) == 0) {
+                        if (write_file(editor_filename, editor_tb.data) == 0) {
                             // cool
                         } else {
                             // error
@@ -303,19 +367,20 @@ void key_handler(struct keyboard_event event) {
 
         case MODE_NORMAL:
             if (event.type == EVENT_KEY_PRESSED) {
-                if (event.key_character >= ' ' && event.key_character <= '~' && command_buffer_idx < MAX_COMMAND_LENGTH - 1) {
-                    command_buffer[command_buffer_idx++] = event.key_character;
-                    print_char(event.key_character);
+                if (event.key_character >= ' ' && event.key_character <= '~') {
+                    if (tb_length(&command_tb) < MAX_COMMAND_LENGTH - 1) {
+                        tb_insert_char(&command_tb, event.key_character);
+                        print_char(event.key_character);
+                    }
                 } else if (event.key == KEY_BACKSPACE) {
-                    if (command_buffer_idx > 0) {
-                        command_buffer_idx--;
+                    if (tb_length(&command_tb) > 0) {
+                        tb_backspace(&command_tb);
                         print_char('\b');
                     }
                 } else if (event.key == KEY_ENTER) {
                     print_char('\n');
-                    command_buffer[command_buffer_idx] = '\0';
-                    execute_command(command_buffer);
-                    command_buffer_idx = 0;
+                    execute_command(command_tb.data);
+                    tb_clear(&command_tb);
                     init_shell_prompt();
                 }
             }
@@ -388,6 +453,9 @@ void kernel_entry() {
     keyboard_set_handler(key_handler);
     timer_set_handler(timer_tick_handler);
 
+    // initialize text buffers
+    tb_init(&command_tb, command_storage, MAX_COMMAND_LENGTH - 1, NULL);
+
     init_shell();
 
     halt_loop();
@@ -401,19 +469,7 @@ void editor_init(const char *filename, const char *initial_content) {
     current_mode = MODE_EDITOR;
     strcpy_custom(editor_filename, filename);
 
-    editor_buffer[0] = '\0';
-    editor_buffer_idx = 0;
-    if (initial_content != NULL) {
-        u32 content_len = strlen_custom(initial_content);
-        if (content_len > MAX_FILE_CONTENT_LENGTH) {
-            content_len = MAX_FILE_CONTENT_LENGTH;
-        }
-        for(u32 i = 0; i < content_len; i++) {
-            editor_buffer[i] = initial_content[i];
-        }
-        editor_buffer[content_len] = '\0';
-        editor_buffer_idx = content_len;
-    }
+    tb_init(&editor_tb, editor_storage, MAX_FILE_CONTENT_LENGTH, initial_content);
 
     editor_refresh_screen();
 }
@@ -427,10 +483,10 @@ void editor_refresh_screen() {
     u32 target_cursor_screen_x = 0;
     u32 target_cursor_screen_y = 0;
 
-    u32 buffer_len = strlen_custom(editor_buffer);
+    u32 buffer_len = tb_length(&editor_tb);
 
     for (u32 i = 0; i <= buffer_len; i++) {
-        if (i == editor_buffer_idx) {
+        if (i == tb_cursor_index(&editor_tb)) {
             target_cursor_screen_x = screen_x;
             target_cursor_screen_y = screen_y;
         }
@@ -439,7 +495,7 @@ void editor_refresh_screen() {
             break;
         }
 
-        char c = editor_buffer[i];
+        char c = editor_tb.data[i];
 
         if (c == '\n') {
             screen_x = 0;
@@ -475,33 +531,12 @@ void editor_refresh_screen() {
 }
 
 void editor_put_char(char c) {
-    u32 current_buffer_len = strlen_custom(editor_buffer);
-
     if (c == '\b') {
-        if (editor_buffer_idx > 0) {    
-            editor_buffer_idx--;
-            for (u32 i = editor_buffer_idx; i < current_buffer_len; i++) {
-                editor_buffer[i] = editor_buffer[i + 1];
-            }
-            editor_buffer[current_buffer_len - 1] = '\0';
-        }
+        tb_backspace(&editor_tb);
     } else if (c == '\t') {
-        if (current_buffer_len + 4 <= MAX_FILE_CONTENT_LENGTH) {
-            for (u32 i = current_buffer_len; i >= editor_buffer_idx; i--) {
-                editor_buffer[i + 4] = editor_buffer[i];
-            }
-            editor_buffer[editor_buffer_idx++] = ' ';
-            editor_buffer[editor_buffer_idx++] = ' ';
-            editor_buffer[editor_buffer_idx++] = ' ';
-            editor_buffer[editor_buffer_idx++] = ' ';
-            editor_buffer[current_buffer_len + 4] = '\0';
-        }
-    } else if (current_buffer_len < MAX_FILE_CONTENT_LENGTH) {
-        for (u32 i = current_buffer_len; i >= editor_buffer_idx; i--) {
-            editor_buffer[i + 1] = editor_buffer[i];
-        }
-        editor_buffer[editor_buffer_idx++] = c;
-        editor_buffer[current_buffer_len + 1] = '\0';
+        tb_insert_tab(&editor_tb);
+    } else {
+        tb_insert_char(&editor_tb, c);
     }
 
     editor_refresh_screen();
@@ -509,8 +544,7 @@ void editor_put_char(char c) {
 
 void editor_exit() {
     current_mode = MODE_NORMAL;
-    editor_buffer[0] = '\0';
-    editor_buffer_idx = 0;
+    tb_clear(&editor_tb);
     editor_cursor_x = 0;
     editor_cursor_y = 0;
     editor_filename[0] = '\0';
@@ -522,10 +556,3 @@ void editor_exit() {
     clear_screen();
     init_shell_prompt();
 }
-
-
-// TODO
-// 1. Animate screensaver
-//// 2. File editor
-//    2.1 fix editor weird bug
-// 3. Remember the screen before screensaving

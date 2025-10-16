@@ -3,6 +3,7 @@
 #define VGA_ADDRESS 0xb8000
 #define VGA_WIDTH 80
 #define VGA_HEIGHT 25
+#define COLORS (0x07 << 4)
 
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -12,7 +13,6 @@ typedef unsigned char bool;
 #define true 1
 #define false 0
 
-// TODO: ensure has the same value as defined in GDT.
 #define KERNEL_CODE_SEGMENT 0x08
 #define INTERRUPT_TIMER 0
 #define INTERRUPT_KEYBOARD 1
@@ -76,5 +76,10 @@ extern void set_interrupt_handler(u32 interrupt, void (*handler)(u32 interrupt))
  * Registers a handler for exceptions.
  */
 extern void set_exception_handler(void (*handler)(u32 interrupt, u32 error, char *message));
+
+// Basic console I/O (implemented in entry.c)
+extern void print_string(const char *s);
+extern void print_char(char c);
+extern void clear_screen();
 
 #endif

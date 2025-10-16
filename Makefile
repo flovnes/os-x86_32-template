@@ -11,7 +11,11 @@ SRC_C   := \
 	src/c/drivers/keyboard/keyboard.c \
 	src/c/drivers/timer/timer.c \
 	src/c/drivers/serial_port/serial_port.c \
-	src/c/drivers/file_system/file_system.c
+	src/c/file_system.c \
+	src/c/text_buffer.c \
+	src/c/console.c \
+	src/c/string.c \
+	src/c/screensaver.c
 
 OBJ_ASM := $(patsubst src/asm/%.asm, build/asm/%.o, $(SRC_ASM))
 OBJ_C   := $(patsubst %.c, build/kernel/%.o, $(SRC_C))

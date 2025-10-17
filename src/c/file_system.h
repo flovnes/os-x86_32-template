@@ -19,11 +19,9 @@ struct fs_file {
 void init_fs();
 int create_file(const char *filename);
 int write_file(const char *filename, const char *data);
-const char* read_file(const char *filename); // const char* to content or NULL
+const char* read_file(const char *filename);
 int delete_file(const char *filename);
 void fs_list_files();
-
-// String utilities moved to lib/string.h
 
 int find_file_index(const char *filename);
 int find_free_file_index();

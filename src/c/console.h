@@ -18,6 +18,8 @@ void console_set_color(u8 bg, u8 fg);
 void console_clear();
 void console_put_char(char c);
 void console_print(const char *s);
+void console_show_cursor();
+void console_hide_cursor();
 
 #endif
 

@@ -6,7 +6,7 @@
 
 void screensaver_start();
 void screensaver_tick();
-void screensaver_stop();
+void screensaver_stop(u8* saved_screen, bool saved_screen_valid, unsigned short saved_cursor_pos, unsigned short* current_cursor_pos);
 
 #endif
 

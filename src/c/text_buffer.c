@@ -14,7 +14,6 @@ void tb_init(TextBuffer *tb, char *storage, u32 capacity, const char *initialCon
     tb->cursorIndex = 0;
     tb_clear(tb);
     if (initialContent != NULL) {
-        // Copy up to capacity characters
         u32 i = 0;
         while (initialContent[i] != '\0' && i < capacity) {
             tb->data[i] = initialContent[i];
@@ -38,7 +37,6 @@ void tb_insert_char(TextBuffer *tb, char c) {
     if (tb->length >= tb->capacity) {
         return;
     }
-    // shift right from cursor to make room
     for (u32 i = tb->length; i > tb->cursorIndex; i--) {
         tb->data[i] = tb->data[i - 1];
     }
@@ -52,7 +50,6 @@ void tb_backspace(TextBuffer *tb) {
     if (tb->cursorIndex == 0 || tb->length == 0) {
         return;
     }
-    // delete char before cursor
     u32 delIndex = tb->cursorIndex - 1;
     for (u32 i = delIndex; i < tb->length; i++) {
         tb->data[i] = tb->data[i + 1];
@@ -64,7 +61,6 @@ void tb_backspace(TextBuffer *tb) {
 }
 
 void tb_insert_tab(TextBuffer *tb) {
-    // insert four spaces if capacity allows
     if (tb->length + 4 > tb->capacity) {
         return;
     }

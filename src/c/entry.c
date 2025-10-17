@@ -5,6 +5,7 @@
 #include "file_system.h"
 #include "text_buffer.h"
 #include "string.h"
+#include "screensaver.h"
 #include <stdbool.h> 
 
 enum kernel_mode {
@@ -29,6 +30,9 @@ static u32 screensaver_string_x = 0;
 static u32 screensaver_string_y = 0;
 static u8 screensaver_color_idx = 0;
 static const char *screensaver_string = ">< '>";
+static u8 saved_screen[VGA_WIDTH * VGA_HEIGHT * 2];
+static bool saved_screen_valid = false;
+static unsigned short saved_cursor_pos = 0;
 
 void scroll_screen(); 
 void print_char(char c); 
@@ -44,6 +48,8 @@ void editor_exit();
 struct alloc { bool in_use; u32 id; u32 size; };
 static struct alloc allocs[MAX_ALLOCS];
 static u32 next_id = 1;
+static bool shift_down = false;
+static bool ctrl_down = false;
 
 static void print_u32_dec(u32 value) {
     char buf[12];
@@ -69,12 +75,43 @@ static bool parse_u32_dec(const char *s, u32 *out_value) {
     return true;
 }
 
+static char apply_shift(char c) {
+    if (c >= 'a' && c <= 'z') { return (char)(c - 'a' + 'A'); }
+    switch (c) {
+        case '1': return '!';
+        case '2': return '@';
+        case '3': return '#';
+        case '4': return '$';
+        case '5': return '%';
+        case '6': return '^';
+        case '7': return '&';
+        case '8': return '*';
+        case '9': return '(';
+        case '0': return ')';
+        case '-': return '_';
+        case '=': return '+';
+        case '[': return '{';
+        case ']': return '}';
+        case ';': return ':';
+        case '\'': return '"';
+        case '`': return '~';
+        case '\\': return '|';
+        case ',': return '<';
+        case '.': return '>';
+        case '/': return '?';
+        default: return c;
+    }
+}
+
 #define MAX_COMMAND_LENGTH 256
 static char command_storage[MAX_COMMAND_LENGTH];
 static TextBuffer command_tb;
+static unsigned short prompt_start_pos = 0;
+static u32 command_rendered_len = 0;
 
 void execute_command(char *command_line); 
 void init_shell_prompt(); 
+static void shell_render_input();
 
 void exception_handler(u32 interrupt, u32 error, char *message) {
     serial_log(LOG_ERROR, message);
@@ -171,7 +208,7 @@ void execute_command(char *command_line) {
         // nothing
     } else if (strcmp(command, "clear") == 0 || strcmp(command, "cls") == 0) {
         clear_screen();
-    } else if (strcmp(command, "help") == 0 || strcmp(command, "man") == 0) {
+    } else if (strcmp(command, "help") == 0 || strcmp(command, "fish") == 0) {
         print_string(" o help - You're here!\n");
         print_string("   clear\n");
         print_string("   sleep\n");
@@ -315,7 +352,9 @@ void init_shell_prompt() {
     if (current_mode != MODE_NORMAL) {return;}
 
     print_string("\n > ");
+    prompt_start_pos = current_cursor_pos;
     print_string(command_tb.data);
+    command_rendered_len = tb_length(&command_tb);
 }
 
 void init_shell() {
@@ -331,15 +370,19 @@ void key_handler(struct keyboard_event event) {
             if (event.type == EVENT_KEY_PRESSED) {
                 inactivity_counter = 0;
                 current_mode = MODE_NORMAL;
-                out(0x3D4, 0x0A); 
-                out(0x3D5, 0x0E); // show cursor
-                clear_screen();
-                init_shell_prompt();
+                bool was_screen_saved = saved_screen_valid;
+                screensaver_stop(saved_screen, saved_screen_valid, saved_cursor_pos, &current_cursor_pos);
+                saved_screen_valid = false;
+                if (!was_screen_saved) {
+                    init_shell_prompt();
+                }
             } 
         break;
 
         case MODE_EDITOR:
             if (event.type == EVENT_KEY_PRESSED) {
+                if (event.key == KEY_LEFT_SHIFT || event.key == KEY_RIGHT_SHIFT) { shift_down = true; break; }
+                if (event.key == KEY_LEFT_CONTROL) { ctrl_down = true; break; }
                 if (event.key == KEY_ESC) {
                     editor_exit();
                 } else if (event.key == KEY_F2) {
@@ -359,30 +402,96 @@ void key_handler(struct keyboard_event event) {
                     editor_put_char('\n');
                 } else if (event.key == KEY_TAB) {
                     editor_put_char('\t');
+                } else if (event.key == KEY_KEYPAD_4) { // left
+                    if (editor_tb.cursorIndex > 0) { editor_tb.cursorIndex--; editor_refresh_screen(); }
+                } else if (event.key == KEY_KEYPAD_6) { // right
+                    if (editor_tb.cursorIndex < tb_length(&editor_tb)) { editor_tb.cursorIndex++; editor_refresh_screen(); }
+                } else if (event.key == KEY_KEYPAD_8) { // up
+                    u32 idx = editor_tb.cursorIndex;
+                    u32 cur_start = idx;
+                    while (cur_start > 0 && editor_tb.data[cur_start - 1] != '\n') { cur_start--; }
+                    if (cur_start == 0) {}
+                    else {
+                        u32 prev_end = cur_start - 1;
+                        u32 prev_start = prev_end;
+                        while (prev_start > 0 && editor_tb.data[prev_start - 1] != '\n') { prev_start--; }
+                        u32 target_col = editor_cursor_x;
+                        u32 new_idx = prev_start;
+                        u32 col = 0;
+                        while (new_idx < cur_start && editor_tb.data[new_idx] != '\n' && col < target_col) {
+                            char c = editor_tb.data[new_idx];
+                            if (c == '\t') { col = (col + 4) & ~3u; } else { col++; }
+                            new_idx++;
+                        }
+                        editor_tb.cursorIndex = new_idx;
+                        editor_refresh_screen();
+                    }
+                } else if (event.key == KEY_KEYPAD_2) { // down
+                    u32 idx = editor_tb.cursorIndex;
+                    u32 line_end = idx;
+                    while (line_end < tb_length(&editor_tb) && editor_tb.data[line_end] != '\n') { line_end++; }
+                    if (line_end < tb_length(&editor_tb)) {
+                        u32 next_start = line_end + 1;
+                        u32 target_col = editor_cursor_x;
+                        u32 new_idx = next_start;
+                        u32 col = 0;
+                        while (new_idx < tb_length(&editor_tb) && editor_tb.data[new_idx] != '\n' && col < target_col) {
+                            char c = editor_tb.data[new_idx];
+                            if (c == '\t') { col = (col + 4) & ~3u; } else { col++; }
+                            new_idx++;
+                        }
+                        editor_tb.cursorIndex = new_idx;
+                        editor_refresh_screen();
+                    }
                 } else if (event.key_character >= ' ' && event.key_character <= '~') {
-                    editor_put_char(event.key_character);
+                    char c = event.key_character;
+                    if (shift_down) { c = apply_shift(c); }
+                    editor_put_char(c);
                 }
+            }
+            else if (event.type == EVENT_KEY_RELEASED) {
+                if (event.key == KEY_LEFT_SHIFT || event.key == KEY_RIGHT_SHIFT) { shift_down = false; }
+                if (event.key == KEY_LEFT_CONTROL) { ctrl_down = false; }
             }
         break;
 
         case MODE_NORMAL:
             if (event.type == EVENT_KEY_PRESSED) {
-                if (event.key_character >= ' ' && event.key_character <= '~') {
-                    if (tb_length(&command_tb) < MAX_COMMAND_LENGTH - 1) {
-                        tb_insert_char(&command_tb, event.key_character);
-                        print_char(event.key_character);
-                    }
+                if (event.key == KEY_LEFT_SHIFT || event.key == KEY_RIGHT_SHIFT) { shift_down = true; break; }
+                if (event.key == KEY_LEFT_CONTROL) { ctrl_down = true; break; }
+                if (event.key == KEY_KEYPAD_4) { // left
+                    if (command_tb.cursorIndex > 0) { command_tb.cursorIndex--; shell_render_input(); }
+                } else if (event.key == KEY_KEYPAD_6) { // right
+                    if (command_tb.cursorIndex < tb_length(&command_tb)) { command_tb.cursorIndex++; shell_render_input(); }
+                } else if (event.key == KEY_KEYPAD_8) { // home
+                    command_tb.cursorIndex = 0; shell_render_input();
+                } else if (event.key == KEY_KEYPAD_2) { // end
+                    command_tb.cursorIndex = tb_length(&command_tb); shell_render_input();
+                } else if (ctrl_down && event.key_character == 'l') {
+                    clear_screen();
+                    init_shell_prompt();
                 } else if (event.key == KEY_BACKSPACE) {
                     if (tb_length(&command_tb) > 0) {
                         tb_backspace(&command_tb);
-                        print_char('\b');
+                        shell_render_input();
                     }
                 } else if (event.key == KEY_ENTER) {
                     print_char('\n');
                     execute_command(command_tb.data);
                     tb_clear(&command_tb);
+                    command_rendered_len = 0;
                     init_shell_prompt();
+                } else if (event.key_character >= ' ' && event.key_character <= '~') {
+                    if (tb_length(&command_tb) < MAX_COMMAND_LENGTH - 1) {
+                        char c = event.key_character;
+                        if (shift_down) { c = apply_shift(c); }
+                        tb_insert_char(&command_tb, c);
+                        shell_render_input();
+                    }
                 }
+            } else if (event.type == EVENT_KEY_RELEASED) {
+                if (event.key == KEY_LEFT_SHIFT || event.key == KEY_RIGHT_SHIFT) { shift_down = false; }
+                if (event.key == KEY_LEFT_CONTROL) { ctrl_down = false; }
             }
         break;
     }
@@ -391,31 +500,8 @@ void key_handler(struct keyboard_event event) {
 void timer_tick_handler() {
     timer_ticks++;
     if (current_mode == MODE_SCREENSAVER) {
-        // if (timer_ticks % 18 != 0) {return;}
-        char *framebuffer = (char *)VGA_ADDRESS;
-        u32 pattern_len = strlen_custom(screensaver_string);
-
-        u32 prev_pattern_offset = screensaver_string_y * VGA_WIDTH * 2 + screensaver_string_x * 2;
-        for (u32 i = 0; i < pattern_len; i++) {
-            if (screensaver_string_x + i < VGA_WIDTH && screensaver_string_y < VGA_HEIGHT) {
-                framebuffer[prev_pattern_offset + i * 2] = ' '; 
-                framebuffer[prev_pattern_offset + i * 2 + 1] = COLORS; 
-            }
-        }
-
-        screensaver_string_x++;
-        if (screensaver_string_x >= VGA_WIDTH) { 
-            screensaver_string_x = 0; 
-        }
-
-        u32 current_pattern_offset = screensaver_string_y * VGA_WIDTH * 2 + screensaver_string_x * 2;
-        for (u32 i = 0; i < pattern_len; i++) {
-            if (screensaver_string_x + i < VGA_WIDTH && screensaver_string_y < VGA_HEIGHT) {
-                framebuffer[current_pattern_offset + i * 2] = screensaver_string[i];
-                framebuffer[current_pattern_offset + i * 2 + 1] = COLORS; 
-            }
-        }
-
+        if (timer_ticks % 18 != 0) {return;}
+        screensaver_tick();
     } else if (current_mode == MODE_NORMAL) {
         inactivity_counter++;
         if (inactivity_counter >= SCREENSAVER_TIMEOUT_TICKS) {
@@ -427,25 +513,17 @@ void timer_tick_handler() {
 
 void activate_screensaver() {
     current_mode = MODE_SCREENSAVER;
-    clear_screen(); 
-    out(0x3D4, 0x0A);
-    out(0x3D5, 0x20);
-
-    screensaver_string_x = 0;
-    screensaver_string_y = VGA_HEIGHT / 2; 
-    screensaver_color_idx = 1; 
-
-    char *framebuffer = (char *)VGA_ADDRESS;
-
-    const char *message = " good night. ";
-    unsigned short msg_len = 0;
-    while(message[msg_len] != '\0') msg_len++;
-
-    unsigned short start_pos = (VGA_WIDTH * (VGA_HEIGHT / 2)) + (VGA_WIDTH / 2) - (msg_len / 2 + 1); 
-    for (unsigned short i = 0; i < msg_len; i++) {
-        framebuffer[(start_pos + i) * 2] = message[i];
-        framebuffer[(start_pos + i) * 2 + 1] = COLORS;
+    char *framebuffer_src = (char *)VGA_ADDRESS;
+    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT * 2; i++) {
+        saved_screen[i] = framebuffer_src[i];
     }
+    
+    saved_cursor_pos = current_cursor_pos;
+    saved_screen_valid = true;
+
+    console_hide_cursor();
+
+    screensaver_start();
 }
 
 void kernel_entry() {
@@ -453,12 +531,48 @@ void kernel_entry() {
     keyboard_set_handler(key_handler);
     timer_set_handler(timer_tick_handler);
 
-    // initialize text buffers
     tb_init(&command_tb, command_storage, MAX_COMMAND_LENGTH - 1, NULL);
 
     init_shell();
 
     halt_loop();
+}
+
+static void shell_render_input() {
+    current_cursor_pos = prompt_start_pos;
+    put_cursor(current_cursor_pos);
+
+    const char *s = command_tb.data;
+    while (*s != '\0') {
+        print_char(*s++);
+    }
+
+    u32 len_now = tb_length(&command_tb);
+    if (command_rendered_len > len_now) {
+        u32 extra = command_rendered_len - len_now;
+        for (u32 i = 0; i < extra; i++) {
+            print_char(' ');
+        }
+        current_cursor_pos -= (unsigned short)extra;
+        put_cursor(current_cursor_pos);
+    }
+
+    command_rendered_len = len_now;
+
+    unsigned short target_pos = prompt_start_pos;
+    for (u32 i = 0; i < command_tb.cursorIndex; i++) {
+        char c = command_tb.data[i];
+        if (c == '\n') {
+            target_pos = (target_pos / VGA_WIDTH + 1) * VGA_WIDTH;
+        } else {
+            target_pos++;
+            if (target_pos >= VGA_WIDTH * VGA_HEIGHT) {
+                target_pos = VGA_WIDTH * (VGA_HEIGHT - 1);
+            }
+        }
+    }
+    current_cursor_pos = target_pos;
+    put_cursor(current_cursor_pos);
 }
 
 static void editor_update_hw_cursor() {
@@ -468,6 +582,15 @@ static void editor_update_hw_cursor() {
 void editor_init(const char *filename, const char *initial_content) {
     current_mode = MODE_EDITOR;
     strcpy_custom(editor_filename, filename);
+
+    {
+        char *framebuffer_src = (char *)VGA_ADDRESS;
+        for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT * 2; i++) {
+            saved_screen[i] = framebuffer_src[i];
+        }
+        saved_cursor_pos = current_cursor_pos;
+        saved_screen_valid = true;
+    }
 
     tb_init(&editor_tb, editor_storage, MAX_FILE_CONTENT_LENGTH, initial_content);
 
@@ -549,10 +672,18 @@ void editor_exit() {
     editor_cursor_y = 0;
     editor_filename[0] = '\0';
 
-    // show cursor
-    out(0x3D4, 0x0A);
-    out(0x3D5, 0x0E);
+    console_show_cursor();
 
-    clear_screen();
-    init_shell_prompt();
+    if (saved_screen_valid) {
+        char *framebuffer = (char *)VGA_ADDRESS;
+        for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT * 2; i++) {
+            framebuffer[i] = saved_screen[i];
+        }
+        current_cursor_pos = saved_cursor_pos;
+        put_cursor(current_cursor_pos);
+        saved_screen_valid = false;
+    } else {
+        clear_screen();
+        init_shell_prompt();
+    }
 }

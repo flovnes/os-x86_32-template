@@ -65,4 +65,14 @@ void console_print(const char *s) {
     }
 }
 
+void console_show_cursor() {
+    out(0x3D4, 0x0A);
+    out(0x3D5, 0x0E);
+}
+
+void console_hide_cursor() {
+    out(0x3D4, 0x0A);
+    out(0x3D5, 0x20);
+}
+
 

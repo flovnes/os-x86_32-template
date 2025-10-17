@@ -15,7 +15,9 @@ SRC_C   := \
 	src/c/text_buffer.c \
 	src/c/console.c \
 	src/c/string.c \
-	src/c/screensaver.c
+	src/c/screensaver.c \
+	src/c/heap.c \
+	src/c/commands.c
 
 OBJ_ASM := $(patsubst src/asm/%.asm, build/asm/%.o, $(SRC_ASM))
 OBJ_C   := $(patsubst %.c, build/kernel/%.o, $(SRC_C))

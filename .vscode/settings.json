@@ -5,6 +5,10 @@
         "stddef.h": "c",
         "stdbool.h": "c",
         "serial_port.h": "c",
-        "console.h": "c"
+        "console.h": "c",
+        "heap.h": "c",
+        "screensaver.h": "c",
+        "shell.h": "c",
+        "kernel_main.h": "c"
     }
 }

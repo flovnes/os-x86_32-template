@@ -6,7 +6,9 @@
 #include "text_buffer.h"
 #include "string.h"
 #include "screensaver.h"
-#include <stdbool.h> 
+#include "heap.h"
+#include "commands.h"
+#include <stdbool.h>
 
 enum kernel_mode {
     MODE_NORMAL,     // shell
@@ -34,20 +36,28 @@ static u8 saved_screen[VGA_WIDTH * VGA_HEIGHT * 2];
 static bool saved_screen_valid = false;
 static unsigned short saved_cursor_pos = 0;
 
-void scroll_screen(); 
-void print_char(char c); 
-void print_string(const char *s); 
-void clear_screen(); 
+void scroll_screen();
+void print_char(char c);
+void print_string(const char *s);
+void clear_screen();
 void activate_screensaver();
 void editor_init(const char *filename, const char *initial_content);
 void editor_refresh_screen();
 void editor_put_char(char c);
 void editor_exit();
 
-#define MAX_ALLOCS 16
-struct alloc { bool in_use; u32 id; u32 size; };
-static struct alloc allocs[MAX_ALLOCS];
-static u32 next_id = 1;
+#define HEAP_INITIAL_SIZE 100
+#define HEAP_MAX_SIZE 1000
+#define HEAP_EXPAND_SIZE 100
+
+struct heap_block {
+    bool in_use;
+    u32 size;
+};
+
+static char heap[HEAP_MAX_SIZE];
+static u32 heap_size = HEAP_INITIAL_SIZE;
+static u32 heap_used = 0;
 static bool shift_down = false;
 static bool ctrl_down = false;
 
@@ -59,8 +69,27 @@ static void print_u32_dec(u32 value) {
     for (int j = i - 1; j >= 0; j--) { print_char(buf[j]); }
 }
 
+static void print_hex(u32 value) {
+    char hex_chars[] = "0123456789ABCDEF";
+    if (value == 0) {
+        print_char('0');
+        return;
+    }
+
+    char buf[9];
+    int i = 0;
+    while (value > 0) {
+        buf[i++] = hex_chars[value & 0xF];
+        value >>= 4;
+    }
+
+    for (int j = i - 1; j >= 0; j--) {
+        print_char(buf[j]);
+    }
+}
+
 static bool parse_u32_dec(const char *s, u32 *out_value) {
-    if (s == NULL || *s == '\0') { return false; }
+    if (s == 0 || *s == '\0') { return false; }
     u32 value = 0;
     const char *p = s;
     while (*p) {
@@ -109,9 +138,42 @@ static TextBuffer command_tb;
 static unsigned short prompt_start_pos = 0;
 static u32 command_rendered_len = 0;
 
-void execute_command(char *command_line); 
-void init_shell_prompt(); 
-static void shell_render_input();
+static void shell_render_input() {
+    current_cursor_pos = prompt_start_pos;
+    put_cursor(current_cursor_pos);
+
+    const char *s = command_tb.data;
+    while (*s != '\0') {
+        print_char(*s++);
+    }
+
+    u32 len_now = tb_length(&command_tb);
+    if (command_rendered_len > len_now) {
+        u32 extra = command_rendered_len - len_now;
+        for (u32 i = 0; i < extra; i++) {
+            print_char(' ');
+        }
+        current_cursor_pos -= (unsigned short)extra;
+        put_cursor(current_cursor_pos);
+    }
+
+    command_rendered_len = len_now;
+
+    unsigned short target_pos = prompt_start_pos;
+    for (u32 i = 0; i < command_tb.cursorIndex; i++) {
+        char c = command_tb.data[i];
+        if (c == '\n') {
+            target_pos = (target_pos / VGA_WIDTH + 1) * VGA_WIDTH;
+        } else {
+            target_pos++;
+            if (target_pos >= VGA_WIDTH * VGA_HEIGHT) {
+                target_pos = VGA_WIDTH * (VGA_HEIGHT - 1);
+            }
+        }
+    }
+    current_cursor_pos = target_pos;
+    put_cursor(current_cursor_pos);
+}
 
 void exception_handler(u32 interrupt, u32 error, char *message) {
     serial_log(LOG_ERROR, message);
@@ -194,173 +256,12 @@ _Noreturn void halt_loop() {
     while (1) { halt(); }
 }
 
-void execute_command(char *command_line) {
-    inactivity_counter = 0;
-
-    char command_line_copy[MAX_COMMAND_LENGTH];
-    strcpy_custom(command_line_copy, command_line);
-
-    char *command = str_split(command_line_copy, " ");
-    char *arg1 = str_split(NULL, " ");
-    char *arg2 = str_split(NULL, "");
-
-    if (command == NULL || *command == '\0') {
-        // nothing
-    } else if (strcmp(command, "clear") == 0 || strcmp(command, "cls") == 0) {
-        clear_screen();
-    } else if (strcmp(command, "help") == 0 || strcmp(command, "fish") == 0) {
-        print_string(" o help - You're here!\n");
-        print_string("   clear\n");
-        print_string("   sleep\n");
-        print_string("   ls\n");
-        print_string("   create <file_name>\n");
-        print_string("   write <file_name> <content>\n");
-        print_string("   edit <file_name>\n");
-        print_string("   read <file_name>\n");
-        print_string("   delete <file_name>\n");
-        print_string("   say <text>\n");
-        print_string("   malloc <size>\n");
-        print_string("   free <id>\n");
-    } else if (strcmp(command, "sleep") == 0 || strcmp(command, "gn") == 0) {
-        activate_screensaver();
-    }
-    else if (strcmp(command, "malloc") == 0) {
-        u32 size = 0;
-        if (!parse_u32_dec(arg1, &size)) {
-            print_string("Usage: malloc <size>\n");
-        } else {
-            int slot = -1;
-            for (int i = 0; i < MAX_ALLOCS; i++) { if (!allocs[i].in_use) { slot = i; break; } }
-            if (slot == -1) {
-                print_string("No slots left\n");
-            } else {
-                allocs[slot].in_use = true;
-                allocs[slot].id = next_id++;
-                allocs[slot].size = size;
-                print_string("id=");
-                print_u32_dec(allocs[slot].id);
-                print_string(" size=");
-                print_u32_dec(size);
-                print_char('\n');
-            }
-        }
-    }
-    else if (strcmp(command, "free") == 0) {
-        u32 id = 0;
-        if (!parse_u32_dec(arg1, &id)) {
-            print_string("say 'help'\n");
-        } else {
-            bool found = false;
-            for (int i = 0; i < MAX_ALLOCS; i++) {
-                if (allocs[i].in_use && allocs[i].id == id) {
-                    allocs[i].in_use = false;
-                    allocs[i].id = 0;
-                    allocs[i].size = 0;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                print_string("Unknown id\n");
-            }
-        }
-    }
-    else if (strcmp(command, "ls") == 0) {
-        fs_list_files();
-    } else if (strcmp(command, "create") == 0 || strcmp(command, "touch") == 0) {
-        if (arg1 == NULL) {
-            print_string("say 'help'\n");
-        } else {
-            if (create_file(arg1) == 0) {
-                print_string("File '");
-                print_string(arg1);
-                print_string("' created.\n");
-            } else {
-                print_string("Failed to create file '");
-                print_string(arg1);
-                print_string("'.\n");
-            }
-        }
-    } else if (strcmp(command, "write") == 0) {
-        if (arg1 == NULL || arg2 == NULL) {
-            print_string("say 'help'\n");
-        } else {
-            if (write_file(arg1, arg2) == 0) {
-                print_string("Content written to '");
-                print_string(arg1);
-                print_string("'.\n");
-            } else {
-                print_string("Failed to write to file '");
-                print_string(arg1);
-                print_string("'.\n");
-            }
-        }
-    } else if (strcmp(command, "edit") == 0 || strcmp(command, "v") == 0) {
-        if (arg1 == NULL) {
-            print_string("say 'help'\n");
-        } else if (strlen_custom(arg1) > MAX_FILENAME_LENGTH) {
-            print_string("Error: Filename too long. Max 32 chars).\n");
-        } else {
-            const char *initial_content = read_file(arg1);
-            if (initial_content == NULL) {
-                initial_content = "\n";
-            }
-            editor_init(arg1, initial_content);
-        }
-    }
-    else if (strcmp(command, "read") == 0 || strcmp(command, "cat") == 0) {
-        if (arg1 == NULL) {
-            print_string("say 'help'\n");
-        } else {
-            const char *content = read_file(arg1);
-            if (content != NULL) {
-                print_string(content);
-                print_char('\n');
-            } else {
-                print_string("File '");
-                print_string(arg1);
-                print_string("' not found.\n");
-            }
-        }
-    } else if (strcmp(command, "delete") == 0 || strcmp(command, "rm") == 0) {
-        if (arg1 == NULL) {
-            print_string("say 'help'\n");
-        } else {
-            if (delete_file(arg1) == 0) {
-                print_string("File '");
-                print_string(arg1);
-                print_string("' deleted.\n");
-            } else {
-                print_string("Failed to delete file '");
-                print_string(arg1);
-                print_string("'.\n");
-            }
-        }
-    }
-    else if (strcmp(command, "say") == 0 || strcmp(command, "echo") == 0) {
-        if (arg1 != NULL) {
-            print_string(arg1);
-        }
-        print_char('\n');
-    }
-    else {
-        print_string("\n  ? Unknown command\n");
-    }
-}
-
-void init_shell_prompt() {
-    if (current_mode != MODE_NORMAL) {return;}
-
-    print_string("\n > ");
-    prompt_start_pos = current_cursor_pos;
-    print_string(command_tb.data);
-    command_rendered_len = tb_length(&command_tb);
-}
-
 void init_shell() {
     clear_screen();
     print_string("\n >< '>   le fish au chocolat \n");
-    init_shell_prompt();
+    print_string(command_tb.data);
+    prompt_start_pos = current_cursor_pos;
+    command_rendered_len = tb_length(&command_tb);
     tb_clear(&command_tb);
 }
 
@@ -374,9 +275,11 @@ void key_handler(struct keyboard_event event) {
                 screensaver_stop(saved_screen, saved_screen_valid, saved_cursor_pos, &current_cursor_pos);
                 saved_screen_valid = false;
                 if (!was_screen_saved) {
-                    init_shell_prompt();
+                    print_string("\n > ");
+                    prompt_start_pos = current_cursor_pos;
+                    command_rendered_len = 0;
                 }
-            } 
+            }
         break;
 
         case MODE_EDITOR:
@@ -469,7 +372,9 @@ void key_handler(struct keyboard_event event) {
                     command_tb.cursorIndex = tb_length(&command_tb); shell_render_input();
                 } else if (ctrl_down && event.key_character == 'l') {
                     clear_screen();
-                    init_shell_prompt();
+                    print_string("\n > ");
+                    prompt_start_pos = current_cursor_pos;
+                    command_rendered_len = 0;
                 } else if (event.key == KEY_BACKSPACE) {
                     if (tb_length(&command_tb) > 0) {
                         tb_backspace(&command_tb);
@@ -480,7 +385,8 @@ void key_handler(struct keyboard_event event) {
                     execute_command(command_tb.data);
                     tb_clear(&command_tb);
                     command_rendered_len = 0;
-                    init_shell_prompt();
+                    print_string("\n > ");
+                    prompt_start_pos = current_cursor_pos;
                 } else if (event.key_character >= ' ' && event.key_character <= '~') {
                     if (tb_length(&command_tb) < MAX_COMMAND_LENGTH - 1) {
                         char c = event.key_character;
@@ -517,7 +423,7 @@ void activate_screensaver() {
     for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT * 2; i++) {
         saved_screen[i] = framebuffer_src[i];
     }
-    
+
     saved_cursor_pos = current_cursor_pos;
     saved_screen_valid = true;
 
@@ -528,6 +434,7 @@ void activate_screensaver() {
 
 void kernel_entry() {
     init_kernel();
+    heap_init();
     keyboard_set_handler(key_handler);
     timer_set_handler(timer_tick_handler);
 
@@ -536,43 +443,6 @@ void kernel_entry() {
     init_shell();
 
     halt_loop();
-}
-
-static void shell_render_input() {
-    current_cursor_pos = prompt_start_pos;
-    put_cursor(current_cursor_pos);
-
-    const char *s = command_tb.data;
-    while (*s != '\0') {
-        print_char(*s++);
-    }
-
-    u32 len_now = tb_length(&command_tb);
-    if (command_rendered_len > len_now) {
-        u32 extra = command_rendered_len - len_now;
-        for (u32 i = 0; i < extra; i++) {
-            print_char(' ');
-        }
-        current_cursor_pos -= (unsigned short)extra;
-        put_cursor(current_cursor_pos);
-    }
-
-    command_rendered_len = len_now;
-
-    unsigned short target_pos = prompt_start_pos;
-    for (u32 i = 0; i < command_tb.cursorIndex; i++) {
-        char c = command_tb.data[i];
-        if (c == '\n') {
-            target_pos = (target_pos / VGA_WIDTH + 1) * VGA_WIDTH;
-        } else {
-            target_pos++;
-            if (target_pos >= VGA_WIDTH * VGA_HEIGHT) {
-                target_pos = VGA_WIDTH * (VGA_HEIGHT - 1);
-            }
-        }
-    }
-    current_cursor_pos = target_pos;
-    put_cursor(current_cursor_pos);
 }
 
 static void editor_update_hw_cursor() {
@@ -684,6 +554,8 @@ void editor_exit() {
         saved_screen_valid = false;
     } else {
         clear_screen();
-        init_shell_prompt();
+        print_string("\n > ");
+        prompt_start_pos = current_cursor_pos;
+        command_rendered_len = 0;
     }
 }

@@ -6,5 +6,6 @@
 void heap_init();
 void* heap_malloc(u32 size);
 void heap_free(void* ptr);
+void heap_list_allocated();
 
 #endif

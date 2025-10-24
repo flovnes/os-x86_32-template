@@ -77,3 +77,35 @@ void heap_free(void* ptr) {
 	}
 	heap_used = last_used_offset;
 }
+
+void heap_list_allocated() {
+	extern void print_string(const char *s);
+	extern void print_char(char c);
+	
+	print_string("Allocated memory blocks:\n");
+	u32 offset = 0;
+	u32 block_count = 0;
+	while (offset < heap_used) {
+		struct heap_block* block = (struct heap_block*)(heap + offset);
+		if (block->in_use) {
+			block_count++;
+			print_string("Block ");
+			print_u32_dec(block_count);
+			print_string(": ptr=");
+			print_u32_dec((u32)((char*)block + sizeof(struct heap_block)));
+			print_string(" size=");
+			print_u32_dec(block->size - sizeof(struct heap_block));
+			print_string(" total=");
+			print_u32_dec(block->size);
+			print_char('\n');
+		}
+		offset += sizeof(struct heap_block) + block->size;
+	}
+	if (block_count == 0) {
+		print_string("No allocated blocks\n");
+	} else {
+		print_string("Total blocks: ");
+		print_u32_dec(block_count);
+		print_char('\n');
+	}
+}

@@ -13,8 +13,8 @@ if %errorlevel% neq 0 (
 docker container inspect os_build >NUL 2>NUL
 if %errorlevel% neq 0 (
   echo Haven't found container named os_build
-  echo Creating a new container from image yevhenii0/os_build:0.0.1. Dir %CD% will be mounted to /src
-  docker run -i -d --name os_build -v %CD%:/src yevhenii0/os_build:0.0.1
+  echo Creating a new container from image flovnes/os_build:0.0.1. Dir %CD% will be mounted to /src
+  docker run -i -d --name os_build -v %CD%:/src flovnes/os_build:0.0.1
 ) else (
   docker start os_build >NUL
 )

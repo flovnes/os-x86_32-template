@@ -14,7 +14,7 @@ extern int create_file(const char *filename);
 extern int delete_file(const char *filename);
 extern void fs_list_files();
 
-static void print_u32_dec(u32 value) {
+void print_u32_dec(u32 value) {
 	char buf[12];
 	int i = 0;
 	if (value == 0) { buf[i++] = '0'; }
@@ -50,10 +50,10 @@ static void print_hex(u32 value) {
 static void cmd_clear(const char *a1, const char *a2) { (void)a1; (void)a2; clear_screen(); }
 static void cmd_help(const char *a1, const char *a2) {
 	(void)a1; (void)a2;
-	print_string(" o help - You're here!\n");
+	print_string("   list\n");
 	print_string("   clear\n");
 	print_string("   sleep\n");
-	print_string("   ls\n");
+	print_string(" o help - You're here!\n");
 	print_string("   create <file_name>\n");
 	print_string("   write <file_name> <content>\n");
 	print_string("   edit <file_name>\n");
@@ -62,6 +62,7 @@ static void cmd_help(const char *a1, const char *a2) {
 	print_string("   say <text>\n");
 	print_string("   malloc <size>\n");
 	print_string("   free <ptr>\n");
+	print_string("   mlist\n");
 }
 static void cmd_sleep(const char *a1, const char *a2) { (void)a1; (void)a2; activate_screensaver(); }
 static void cmd_malloc(const char *a1, const char *a2) {
@@ -70,8 +71,8 @@ static void cmd_malloc(const char *a1, const char *a2) {
 	if (!parse_u32_dec(a1, &size)) { print_string("Usage: malloc <size>\n"); return; }
 	void* ptr = heap_malloc(size);
 	if (ptr) {
-		print_string("ptr=0x");
-		print_hex((u32)ptr);
+		print_string("ptr=");
+		print_u32_dec((u32)ptr);
 		print_string(" size=");
 		print_u32_dec(size);
 		print_char('\n');
@@ -86,6 +87,7 @@ static void cmd_free(const char *a1, const char *a2) {
 	heap_free((void*)ptr_val);
 	print_string("Freed\n");
 }
+static void cmd_memlist(const char *a1, const char *a2) { (void)a1; (void)a2; heap_list_allocated(); }
 static void cmd_ls(const char *a1, const char *a2) { (void)a1; (void)a2; fs_list_files(); }
 static void cmd_create(const char *a1, const char *a2) {
 	(void)a2;
@@ -101,7 +103,7 @@ static void cmd_write(const char *a1, const char *a2) {
 static void cmd_edit(const char *a1, const char *a2) {
 	(void)a2;
 	if (a1 == NULL) { print_string("say 'help'\n"); return; }
-	if (strlen_custom(a1) > 32) { print_string("Error: Filename too long. Max 32 chars).\n"); return; }
+	if (strlen_custom(a1) > 32) { print_string("Error: filename > 32 chars).\n"); return; }
 	const char *initial_content = read_file(a1);
 	if (initial_content == NULL) { initial_content = "\n"; }
 	editor_init(a1, initial_content);
@@ -121,7 +123,6 @@ static void cmd_delete(const char *a1, const char *a2) {
 }
 static void cmd_say(const char *a1, const char *a2) { (void)a2; if (a1) print_string(a1); print_char('\n'); }
 
-// --- Dispatch Table ---
 struct command_entry { const char *name; void (*handler)(const char*, const char*); };
 static const struct command_entry COMMANDS[] = {
 	{ "clear",  cmd_clear },
@@ -132,9 +133,13 @@ static const struct command_entry COMMANDS[] = {
 	{ "gn",     cmd_sleep },
 	{ "malloc", cmd_malloc },
 	{ "free",   cmd_free },
+	{ "mlist", cmd_memlist },
+	{ "mem", cmd_memlist },
 	{ "ls",     cmd_ls },
+	{ "list",     cmd_ls },
 	{ "create", cmd_create },
 	{ "touch",  cmd_create },
+	{ "new",  cmd_create },
 	{ "write",  cmd_write },
 	{ "edit",   cmd_edit },
 	{ "v",      cmd_edit },

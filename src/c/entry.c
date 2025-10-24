@@ -263,6 +263,11 @@ void init_shell() {
     prompt_start_pos = current_cursor_pos;
     command_rendered_len = tb_length(&command_tb);
     tb_clear(&command_tb);
+    if (!saved_screen_valid) {
+        print_string("\n > ");
+        prompt_start_pos = current_cursor_pos;
+        command_rendered_len = 0;
+    }
 }
 
 void key_handler(struct keyboard_event event) {
@@ -406,7 +411,7 @@ void key_handler(struct keyboard_event event) {
 void timer_tick_handler() {
     timer_ticks++;
     if (current_mode == MODE_SCREENSAVER) {
-        if (timer_ticks % 18 != 0) {return;}
+        if (timer_ticks % 9 != 0) {return;}
         screensaver_tick();
     } else if (current_mode == MODE_NORMAL) {
         inactivity_counter++;

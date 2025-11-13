@@ -2,181 +2,106 @@
 #include "drivers/keyboard/keyboard.h"
 #include "drivers/timer/timer.h"
 #include "drivers/serial_port/serial_port.h"
-#include "file_system.h"
-#include "text_buffer.h"
-#include "string.h"
 #include "screensaver.h"
-#include "heap.h"
-#include "commands.h"
 #include <stdbool.h>
 
-enum kernel_mode {
-    MODE_NORMAL,     // shell
-    MODE_EDITOR,
-    MODE_SCREENSAVER
-};
+static unsigned short cursor_position = 0;
 
-static unsigned short current_cursor_pos = 0;
-static unsigned short inactivity_counter = 0;
-static const u32 SCREENSAVER_TIMEOUT_TICKS = 360;
-static u32 timer_ticks = 0;
-static enum kernel_mode current_mode = MODE_NORMAL;
+#define VGA_WIDTH 80
+#define VGA_HEIGHT 25
+#define VGA_FRAMEBUFFER_START 0xB8000
 
-static char editor_storage[MAX_FILE_CONTENT_LENGTH + 1];
-static TextBuffer editor_tb;
-static u32 editor_cursor_x = 0;
-static u32 editor_cursor_y = 0;
-static char editor_filename[MAX_FILENAME_LENGTH + 1];
+#define COLOR_PROMPT_MESSAGE ((0xA << 4) | 0x2) // Light Green (0xA) foreground on Black (0x0) background
+#define COLOR_PROMPT_SYMBOL  ((0x2 << 4) | 0xA) // Green (0x2) foreground on Light Green (0xA) background (reversed for effect)
+#define COLOR_COMMAND_TEXT   ((0x2 << 4) | 0xF) // White (0xF) foreground on Green (0x2) background
+#define COLOR_ERROR_TEXT     ((0x4 << 4) | 0xF) // White (0xF) foreground on Red (0x4) background
+#define COLOR_DEFAULT_TEXT   ((0x0 << 4) | 0xF) // White (0xF) foreground on Black (0x0) background
 
-static u32 screensaver_string_x = 0;
-static u32 screensaver_string_y = 0;
-static u8 screensaver_color_idx = 0;
-static const char *screensaver_string = ">< '>";
-static u8 saved_screen[VGA_WIDTH * VGA_HEIGHT * 2];
+#define SHELL_MAX_INPUT_LENGTH 256
+static char shell_input_buffer[SHELL_MAX_INPUT_LENGTH];
+static unsigned int shell_input_buffer_index = 0;
+static bool command_ready = false;
+static u32 idle_ticks = 0;
 static bool saved_screen_valid = false;
 static unsigned short saved_cursor_pos = 0;
+static unsigned short current_cursor_pos = 0;
+static u8 saved_screen[VGA_WIDTH * VGA_HEIGHT * 2];
 
-void scroll_screen();
-void print_char(char c);
-void print_string(const char *s);
-void clear_screen();
-void activate_screensaver();
-void editor_init(const char *filename, const char *initial_content);
-void editor_refresh_screen();
-void editor_put_char(char c);
-void editor_exit();
-
-#define HEAP_INITIAL_SIZE 100
-#define HEAP_MAX_SIZE 1000
-#define HEAP_EXPAND_SIZE 100
-
-struct heap_block {
-    bool in_use;
-    u32 size;
-};
-
-static char heap[HEAP_MAX_SIZE];
-static u32 heap_size = HEAP_INITIAL_SIZE;
-static u32 heap_used = 0;
-static bool shift_down = false;
-static bool ctrl_down = false;
-
-static void print_u32_dec(u32 value) {
-    char buf[12];
-    int i = 0;
-    if (value == 0) { buf[i++] = '0'; }
-    while (value > 0) { buf[i++] = (value % 10) + '0'; value /= 10; }
-    for (int j = i - 1; j >= 0; j--) { print_char(buf[j]); }
+void put_cursor(unsigned short pos) {
+    out(0x3D4, 14);
+    out(0x3D5, ((pos >> 8) & 0x00FF));
+    out(0x3D4, 15);
+    out(0x3D5, pos & 0x00FF);
 }
 
-static void print_hex(u32 value) {
-    char hex_chars[] = "0123456789ABCDEF";
-    if (value == 0) {
-        print_char('0');
-        return;
-    }
-
-    char buf[9];
-    int i = 0;
-    while (value > 0) {
-        buf[i++] = hex_chars[value & 0xF];
-        value >>= 4;
-    }
-
-    for (int j = i - 1; j >= 0; j--) {
-        print_char(buf[j]);
+void clear_screen() {
+    char *framebuffer = (char *) VGA_FRAMEBUFFER_START;
+    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT * 2; i += 2) {
+        *(framebuffer + i) = ' ';             // Character: space
+        *(framebuffer + i + 1) = COLOR_DEFAULT_TEXT; // Default color
     }
 }
 
-static bool parse_u32_dec(const char *s, u32 *out_value) {
-    if (s == 0 || *s == '\0') { return false; }
-    u32 value = 0;
-    const char *p = s;
-    while (*p) {
-        if (*p < '0' || *p > '9') { return false; }
-        u32 digit = (u32)(*p - '0');
-        u32 new_value = value * 10 + digit;
-        if (new_value < value) { return false; }
-        value = new_value;
-        p++;
-    }
-    *out_value = value;
-    return true;
-}
+void scroll_screen() {
+    char *framebuffer = (char *) VGA_FRAMEBUFFER_START;
 
-static char apply_shift(char c) {
-    if (c >= 'a' && c <= 'z') { return (char)(c - 'a' + 'A'); }
-    switch (c) {
-        case '1': return '!';
-        case '2': return '@';
-        case '3': return '#';
-        case '4': return '$';
-        case '5': return '%';
-        case '6': return '^';
-        case '7': return '&';
-        case '8': return '*';
-        case '9': return '(';
-        case '0': return ')';
-        case '-': return '_';
-        case '=': return '+';
-        case '[': return '{';
-        case ']': return '}';
-        case ';': return ':';
-        case '\'': return '"';
-        case '`': return '~';
-        case '\\': return '|';
-        case ',': return '<';
-        case '.': return '>';
-        case '/': return '?';
-        default: return c;
+    for (int i = 0; i < (VGA_HEIGHT - 1) * VGA_WIDTH * 2; i++) {
+        framebuffer[i] = framebuffer[i + VGA_WIDTH * 2];
+    }
+
+    for (int i = (VGA_HEIGHT - 1) * VGA_WIDTH * 2; i < VGA_HEIGHT * VGA_WIDTH * 2; i += 2) {
+        *(framebuffer + i) = ' ';             // Character: space
+        *(framebuffer + i + 1) = COLOR_DEFAULT_TEXT; // Default color
     }
 }
 
-#define MAX_COMMAND_LENGTH 256
-static char command_storage[MAX_COMMAND_LENGTH];
-static TextBuffer command_tb;
-static unsigned short prompt_start_pos = 0;
-static u32 command_rendered_len = 0;
+void put_char_on_screen(char c, char color_byte) {
+    char *framebuffer = (char *) VGA_FRAMEBUFFER_START;
 
-static void shell_render_input() {
-    current_cursor_pos = prompt_start_pos;
-    put_cursor(current_cursor_pos);
-
-    const char *s = command_tb.data;
-    while (*s != '\0') {
-        print_char(*s++);
-    }
-
-    u32 len_now = tb_length(&command_tb);
-    if (command_rendered_len > len_now) {
-        u32 extra = command_rendered_len - len_now;
-        for (u32 i = 0; i < extra; i++) {
-            print_char(' ');
+    if (c == '\n') { // Newline character
+        cursor_position = (cursor_position / VGA_WIDTH + 1) * VGA_WIDTH;
+    } else if (c == '\b') { // Backspace character
+        if (cursor_position > 0) {
+            cursor_position--;
+            *(framebuffer + cursor_position * 2) = ' '; // Erase character with a space
+            *(framebuffer + cursor_position * 2 + 1) = color_byte; // Maintain color
         }
-        current_cursor_pos -= (unsigned short)extra;
-        put_cursor(current_cursor_pos);
+    } else { // Regular printable character
+        unsigned short offset = cursor_position * 2;
+        *(framebuffer + offset) = c;
+        *(framebuffer + offset + 1) = color_byte;
+        cursor_position++;
     }
 
-    command_rendered_len = len_now;
-
-    unsigned short target_pos = prompt_start_pos;
-    for (u32 i = 0; i < command_tb.cursorIndex; i++) {
-        char c = command_tb.data[i];
-        if (c == '\n') {
-            target_pos = (target_pos / VGA_WIDTH + 1) * VGA_WIDTH;
-        } else {
-            target_pos++;
-            if (target_pos >= VGA_WIDTH * VGA_HEIGHT) {
-                target_pos = VGA_WIDTH * (VGA_HEIGHT - 1);
-            }
-        }
+    // Handle line wrap
+    if (cursor_position >= VGA_WIDTH * VGA_HEIGHT) {
+        scroll_screen();
+        // After scrolling, the cursor should be at the beginning of the last line
+        cursor_position = (VGA_HEIGHT - 1) * VGA_WIDTH;
     }
-    current_cursor_pos = target_pos;
-    put_cursor(current_cursor_pos);
+    
+    put_cursor(cursor_position);
 }
+
+void print_string(const char *str, char color_byte) {
+    while (*str != '\0') {
+        put_char_on_screen(*str, color_byte);
+        str++;
+    }
+}
+
+void print_shell_prompt() {
+    print_string("My shell 0.0.1\n", COLOR_PROMPT_MESSAGE);
+    print_string("\n$ ", COLOR_PROMPT_SYMBOL);
+}
+
+// --- Exception Handler and Kernel Initialization (as in your original code) ---
 
 void exception_handler(u32 interrupt, u32 error, char *message) {
     serial_log(LOG_ERROR, message);
+    print_string("KERNEL PANIC: ", COLOR_ERROR_TEXT);
+    print_string(message, COLOR_ERROR_TEXT);
+    halt_loop(); // Halt if a serious exception occurs
 }
 
 void init_kernel() {
@@ -191,376 +116,128 @@ void init_kernel() {
     enable_interrupts();
 }
 
-void put_cursor(unsigned short pos) {
-    out(0x3D4, 14);
-    out(0x3D5, ((pos >> 8) & 0x00FF));
-    out(0x3D4, 15);
-    out(0x3D5, pos & 0x00FF);
-}
-
-void scroll_screen() {
-    char *framebuffer = (char *)VGA_ADDRESS;
-    // move all lines up by 1
-    // line is VGA_WIDTH, and each character is 2 bytes
-    for (int i = 0; i < VGA_WIDTH * (VGA_HEIGHT - 1) * 2; i++) {
-        framebuffer[i] = framebuffer[i + VGA_WIDTH * 2];
-    }
-    // clear the last line
-    for (int i = VGA_WIDTH * (VGA_HEIGHT - 1) * 2; i < VGA_WIDTH * VGA_HEIGHT * 2; i += 2) {
-        framebuffer[i] = ' ';
-        framebuffer[i + 1] = COLORS;
-    }
-    current_cursor_pos = (VGA_HEIGHT - 1) * VGA_WIDTH;
-    put_cursor(current_cursor_pos);
-}
-
-void print_char(char c) {
-    char *framebuffer = (char *)VGA_ADDRESS;
-    if (c == '\n') {
-        current_cursor_pos = (current_cursor_pos / VGA_WIDTH + 1) * VGA_WIDTH; // a/n+1, a<=n
-    } else if (c == '\b') {
-        if (current_cursor_pos > 0) {
-            current_cursor_pos--;
-            framebuffer[current_cursor_pos * 2] = ' ';
-            framebuffer[current_cursor_pos * 2 + 1] = COLORS;
-        }
-    } else {
-        framebuffer[current_cursor_pos * 2] = c;
-        framebuffer[current_cursor_pos * 2 + 1] = COLORS;
-        current_cursor_pos++;
-    }
-    if (current_cursor_pos >= VGA_WIDTH * VGA_HEIGHT) {
-        scroll_screen();
-    }
-    put_cursor(current_cursor_pos);
-}
-
-void print_string(const char *s) {
-    while (*s != '\0') {
-        print_char(*s);
-        s++;
-    }
-}
-
-void clear_screen() {
-    char *framebuffer = (char *)VGA_ADDRESS;
-    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++) {
-        framebuffer[i * 2] = ' ';
-        framebuffer[i * 2 + 1] = COLORS;
-    }
-    current_cursor_pos = 0;
-    put_cursor(0);
-}
-
 _Noreturn void halt_loop() {
     while (1) { halt(); }
 }
 
-void init_shell() {
-    clear_screen();
-    print_string("\n >< '>   le fish au chocolat \n");
-    print_string(command_tb.data);
-    prompt_start_pos = current_cursor_pos;
-    command_rendered_len = tb_length(&command_tb);
-    tb_clear(&command_tb);
-    if (!saved_screen_valid) {
-        print_string("\n > ");
-        prompt_start_pos = current_cursor_pos;
-        command_rendered_len = 0;
-    }
-}
-
-void key_handler(struct keyboard_event event) {
-    switch (current_mode) {
-        case MODE_SCREENSAVER:
-            if (event.type == EVENT_KEY_PRESSED) {
-                inactivity_counter = 0;
-                current_mode = MODE_NORMAL;
-                bool was_screen_saved = saved_screen_valid;
-                screensaver_stop(saved_screen, saved_screen_valid, saved_cursor_pos, &current_cursor_pos);
-                saved_screen_valid = false;
-                if (!was_screen_saved) {
-                    print_string("\n > ");
-                    prompt_start_pos = current_cursor_pos;
-                    command_rendered_len = 0;
-                }
-            }
-        break;
-
-        case MODE_EDITOR:
-            if (event.type == EVENT_KEY_PRESSED) {
-                if (event.key == KEY_LEFT_SHIFT || event.key == KEY_RIGHT_SHIFT) { shift_down = true; break; }
-                if (event.key == KEY_LEFT_CONTROL) { ctrl_down = true; break; }
-                if (event.key == KEY_ESC) {
-                    editor_exit();
-                } else if (event.key == KEY_F2) {
-                    if (strlen_custom(editor_filename) > 0) {
-                        if (write_file(editor_filename, editor_tb.data) == 0) {
-                            // cool
-                        } else {
-                            // error
-                        }
-                    } else {
-                        // no save name
-                    }
-                    editor_exit();
-                } else if (event.key == KEY_BACKSPACE) {
-                    editor_put_char('\b');
-                } else if (event.key == KEY_ENTER) {
-                    editor_put_char('\n');
-                } else if (event.key == KEY_TAB) {
-                    editor_put_char('\t');
-                } else if (event.key == KEY_KEYPAD_4) { // left
-                    if (editor_tb.cursorIndex > 0) { editor_tb.cursorIndex--; editor_refresh_screen(); }
-                } else if (event.key == KEY_KEYPAD_6) { // right
-                    if (editor_tb.cursorIndex < tb_length(&editor_tb)) { editor_tb.cursorIndex++; editor_refresh_screen(); }
-                } else if (event.key == KEY_KEYPAD_8) { // up
-                    u32 idx = editor_tb.cursorIndex;
-                    u32 cur_start = idx;
-                    while (cur_start > 0 && editor_tb.data[cur_start - 1] != '\n') { cur_start--; }
-                    if (cur_start == 0) {}
-                    else {
-                        u32 prev_end = cur_start - 1;
-                        u32 prev_start = prev_end;
-                        while (prev_start > 0 && editor_tb.data[prev_start - 1] != '\n') { prev_start--; }
-                        u32 target_col = editor_cursor_x;
-                        u32 new_idx = prev_start;
-                        u32 col = 0;
-                        while (new_idx < cur_start && editor_tb.data[new_idx] != '\n' && col < target_col) {
-                            char c = editor_tb.data[new_idx];
-                            if (c == '\t') { col = (col + 4) & ~3u; } else { col++; }
-                            new_idx++;
-                        }
-                        editor_tb.cursorIndex = new_idx;
-                        editor_refresh_screen();
-                    }
-                } else if (event.key == KEY_KEYPAD_2) { // down
-                    u32 idx = editor_tb.cursorIndex;
-                    u32 line_end = idx;
-                    while (line_end < tb_length(&editor_tb) && editor_tb.data[line_end] != '\n') { line_end++; }
-                    if (line_end < tb_length(&editor_tb)) {
-                        u32 next_start = line_end + 1;
-                        u32 target_col = editor_cursor_x;
-                        u32 new_idx = next_start;
-                        u32 col = 0;
-                        while (new_idx < tb_length(&editor_tb) && editor_tb.data[new_idx] != '\n' && col < target_col) {
-                            char c = editor_tb.data[new_idx];
-                            if (c == '\t') { col = (col + 4) & ~3u; } else { col++; }
-                            new_idx++;
-                        }
-                        editor_tb.cursorIndex = new_idx;
-                        editor_refresh_screen();
-                    }
-                } else if (event.key_character >= ' ' && event.key_character <= '~') {
-                    char c = event.key_character;
-                    if (shift_down) { c = apply_shift(c); }
-                    editor_put_char(c);
-                }
-            }
-            else if (event.type == EVENT_KEY_RELEASED) {
-                if (event.key == KEY_LEFT_SHIFT || event.key == KEY_RIGHT_SHIFT) { shift_down = false; }
-                if (event.key == KEY_LEFT_CONTROL) { ctrl_down = false; }
-            }
-        break;
-
-        case MODE_NORMAL:
-            if (event.type == EVENT_KEY_PRESSED) {
-                if (event.key == KEY_LEFT_SHIFT || event.key == KEY_RIGHT_SHIFT) { shift_down = true; break; }
-                if (event.key == KEY_LEFT_CONTROL) { ctrl_down = true; break; }
-                if (event.key == KEY_KEYPAD_4) { // left
-                    if (command_tb.cursorIndex > 0) { command_tb.cursorIndex--; shell_render_input(); }
-                } else if (event.key == KEY_KEYPAD_6) { // right
-                    if (command_tb.cursorIndex < tb_length(&command_tb)) { command_tb.cursorIndex++; shell_render_input(); }
-                } else if (event.key == KEY_KEYPAD_8) { // home
-                    command_tb.cursorIndex = 0; shell_render_input();
-                } else if (event.key == KEY_KEYPAD_2) { // end
-                    command_tb.cursorIndex = tb_length(&command_tb); shell_render_input();
-                } else if (ctrl_down && event.key_character == 'l') {
-                    clear_screen();
-                    print_string("\n > ");
-                    prompt_start_pos = current_cursor_pos;
-                    command_rendered_len = 0;
-                } else if (event.key == KEY_BACKSPACE) {
-                    if (tb_length(&command_tb) > 0) {
-                        tb_backspace(&command_tb);
-                        shell_render_input();
-                    }
-                } else if (event.key == KEY_ENTER) {
-                    print_char('\n');
-                    execute_command(command_tb.data);
-                    tb_clear(&command_tb);
-                    command_rendered_len = 0;
-                    print_string("\n > ");
-                    prompt_start_pos = current_cursor_pos;
-                } else if (event.key_character >= ' ' && event.key_character <= '~') {
-                    if (tb_length(&command_tb) < MAX_COMMAND_LENGTH - 1) {
-                        char c = event.key_character;
-                        if (shift_down) { c = apply_shift(c); }
-                        tb_insert_char(&command_tb, c);
-                        shell_render_input();
-                    }
-                }
-            } else if (event.type == EVENT_KEY_RELEASED) {
-                if (event.key == KEY_LEFT_SHIFT || event.key == KEY_RIGHT_SHIFT) { shift_down = false; }
-                if (event.key == KEY_LEFT_CONTROL) { ctrl_down = false; }
-            }
-        break;
-    }
-}
-
 void timer_tick_handler() {
-    timer_ticks++;
-    if (current_mode == MODE_SCREENSAVER) {
-        if (timer_ticks % 9 != 0) {return;}
+    idle_ticks++;
+
+    if (screensaver_active) {
         screensaver_tick();
-    } else if (current_mode == MODE_NORMAL) {
-        inactivity_counter++;
-        if (inactivity_counter >= SCREENSAVER_TIMEOUT_TICKS) {
-            activate_screensaver();
-            inactivity_counter = 0;
+    } else {
+        if (idle_ticks >= SCREENSAVER_TIMEOUT_TICKS) {
+            screensaver_active = true;
+            char *framebuffer = (char *)VGA_FRAMEBUFFER_START;
+            for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT * 2; i++) {
+                saved_screen[i] = framebuffer[i];
+            }
+            saved_cursor_pos = cursor_position;
+            screensaver_start();
+        }
+    }
+}
+void key_handler(struct keyboard_event event) {
+    if (event.type == EVENT_KEY_PRESSED) {
+        i    if (screensaver_active) {
+        screensaver_active = false;
+        screensaver_stop(saved_screen, saved_screen_valid, saved_cursor_pos, &current_cursor_pos);
+        put_cursor(cursor_position);
+        return;
+    }
+        if (event.key_character) {
+            if (shell_input_buffer_index < SHELL_MAX_INPUT_LENGTH - 1) {
+                shell_input_buffer[shell_input_buffer_index++] = event.key_character;
+                put_char_on_screen(event.key_character, COLOR_COMMAND_TEXT);
+            }
+        } else {
+            switch (event.key) {
+                case KEY_BACKSPACE:
+                    if (shell_input_buffer_index > 0) {
+                        shell_input_buffer_index--;
+                        put_char_on_screen('\b', COLOR_COMMAND_TEXT);
+                    }
+                    break;
+                case KEY_ENTER:
+                    shell_input_buffer[shell_input_buffer_index] = '\0';
+                    put_char_on_screen('\n', COLOR_COMMAND_TEXT);
+                    command_ready = true;
+                    break;
+                case KEY_TAB:
+                    for (int i = 0; i < 4; ++i) {
+                        if (shell_input_buffer_index < SHELL_MAX_INPUT_LENGTH - 1) {
+                            shell_input_buffer[shell_input_buffer_index++] = ' ';
+                            put_char_on_screen(' ', COLOR_COMMAND_TEXT);
+                        }
+                    }
+                    break;
+                default:
+                    break;
+            }
         }
     }
 }
 
-void activate_screensaver() {
-    current_mode = MODE_SCREENSAVER;
-    char *framebuffer_src = (char *)VGA_ADDRESS;
-    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT * 2; i++) {
-        saved_screen[i] = framebuffer_src[i];
+int strcmp(const char *s1, const char *s2) {
+    while (*s1 && (*s1 == *s2)) {
+        s1++;
+        s2++;
     }
-
-    saved_cursor_pos = current_cursor_pos;
-    saved_screen_valid = true;
-
-    console_hide_cursor();
-
-    screensaver_start();
+    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
 }
 
+
+void execute_command(const char *command) {
+    // Trim leading/trailing whitespace if needed (not implemented here for simplicity)
+    // Convert to lowercase if commands are case-insensitive (not implemented here)
+
+    if (strcmp(command, "man") == 0) {
+        print_string("Command 'man' executed!\n", COLOR_DEFAULT_TEXT);
+    } else if (strcmp(command, "z") == 0) {
+        print_string("Command 'z' executed!\n", COLOR_DEFAULT_TEXT);
+    } else if (strcmp(command, "v") == 0) {
+        print_string("Command 'v' executed!\n", COLOR_DEFAULT_TEXT);
+    } else if (strcmp(command, "clear") == 0) {
+        clear_screen();
+        cursor_position = 0; // Reset cursor after clearing
+    }
+    else {
+        print_string("Command not found\n", COLOR_ERROR_TEXT);
+    }
+    command_ready = false;
+}
+
+// --- Main Shell Loop ---
+
+void main_shell_loop() {
+    print_shell_prompt(); // Initial prompt
+
+    while (true) {
+        if (command_ready) {
+            execute_command(shell_input_buffer);
+            
+            // Reset for next command
+            shell_input_buffer_index = 0;
+            
+            print_shell_prompt(); // Print prompt for next command
+        }
+        halt(); // Pause CPU until next interrupt (e.g., keyboard or timer)
+    }
+}
+
+
+// --- Kernel Entry Point ---
+
+/**
+ * This is where the bootloader transfers control to.
+ */
 void kernel_entry() {
     init_kernel();
-    heap_init();
     keyboard_set_handler(key_handler);
     timer_set_handler(timer_tick_handler);
 
-    tb_init(&command_tb, command_storage, MAX_COMMAND_LENGTH - 1, NULL);
-
-    init_shell();
-
-    halt_loop();
-}
-
-static void editor_update_hw_cursor() {
-    put_cursor(editor_cursor_y * VGA_WIDTH + editor_cursor_x);
-}
-
-void editor_init(const char *filename, const char *initial_content) {
-    current_mode = MODE_EDITOR;
-    strcpy_custom(editor_filename, filename);
-
-    {
-        char *framebuffer_src = (char *)VGA_ADDRESS;
-        for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT * 2; i++) {
-            saved_screen[i] = framebuffer_src[i];
-        }
-        saved_cursor_pos = current_cursor_pos;
-        saved_screen_valid = true;
-    }
-
-    tb_init(&editor_tb, editor_storage, MAX_FILE_CONTENT_LENGTH, initial_content);
-
-    editor_refresh_screen();
-}
-
-void editor_refresh_screen() {
     clear_screen();
-    char *framebuffer = (char *)VGA_ADDRESS;
-    u32 screen_x = 0;
-    u32 screen_y = 0;
+    cursor_position = 0; // Ensure cursor is at top-left initially
 
-    u32 target_cursor_screen_x = 0;
-    u32 target_cursor_screen_y = 0;
-
-    u32 buffer_len = tb_length(&editor_tb);
-
-    for (u32 i = 0; i <= buffer_len; i++) {
-        if (i == tb_cursor_index(&editor_tb)) {
-            target_cursor_screen_x = screen_x;
-            target_cursor_screen_y = screen_y;
-        }
-
-        if (i == buffer_len) {
-            break;
-        }
-
-        char c = editor_tb.data[i];
-
-        if (c == '\n') {
-            screen_x = 0;
-            screen_y++;
-        } else if (c == '\t') {
-            u32 tab_stop = 4;
-            screen_x = (screen_x + tab_stop) & ~(tab_stop - 1);
-            if (screen_x >= VGA_WIDTH) {
-                screen_x -= VGA_WIDTH;
-                screen_y++;
-            }
-        } else {
-            if (screen_y < VGA_HEIGHT) {
-                framebuffer[(screen_y * VGA_WIDTH + screen_x) * 2] = c;
-                framebuffer[(screen_y * VGA_WIDTH + screen_x) * 2 + 1] = COLORS;
-            }
-            screen_x++;
-            if (screen_x >= VGA_WIDTH) {
-                screen_x = 0;
-                screen_y++;
-            }
-        }
-
-        if (screen_y >= VGA_HEIGHT) {
-            screen_y = VGA_HEIGHT - 1;
-        }
-    }
-
-    editor_cursor_x = target_cursor_screen_x;
-    editor_cursor_y = target_cursor_screen_y;
-
-    editor_update_hw_cursor();
-}
-
-void editor_put_char(char c) {
-    if (c == '\b') {
-        tb_backspace(&editor_tb);
-    } else if (c == '\t') {
-        tb_insert_tab(&editor_tb);
-    } else {
-        tb_insert_char(&editor_tb, c);
-    }
-
-    editor_refresh_screen();
-}
-
-void editor_exit() {
-    current_mode = MODE_NORMAL;
-    tb_clear(&editor_tb);
-    editor_cursor_x = 0;
-    editor_cursor_y = 0;
-    editor_filename[0] = '\0';
-
-    console_show_cursor();
-
-    if (saved_screen_valid) {
-        char *framebuffer = (char *)VGA_ADDRESS;
-        for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT * 2; i++) {
-            framebuffer[i] = saved_screen[i];
-        }
-        current_cursor_pos = saved_cursor_pos;
-        put_cursor(current_cursor_pos);
-        saved_screen_valid = false;
-    } else {
-        clear_screen();
-        print_string("\n > ");
-        prompt_start_pos = current_cursor_pos;
-        command_rendered_len = 0;
-    }
+    main_shell_loop(); // Enter the main shell loop
 }

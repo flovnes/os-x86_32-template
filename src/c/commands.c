@@ -162,7 +162,7 @@ static const char* next_token(const char *s, char *out, u32 out_cap) {
 	return skip_ws(s);
 }
 
-void execute_command(const char *command_line) {
+void execute_command(const char *command_line, bool *mode_changed_out) {
 	char cmd[64];
 	char arg1[256];
 	char arg2[256];
@@ -173,9 +173,14 @@ void execute_command(const char *command_line) {
 		u32 i = 0; while (*p && i+1<sizeof(arg2)) { arg2[i++] = *p++; } arg2[i] = '\0';
 	} else { arg2[0] = '\0'; }
 
-	if (cmd[0] == '\0') return;
-	for (u32 i = 0; i < COMMAND_COUNT; i++) {
-		if (strcmp(COMMANDS[i].name, cmd) == 0) { COMMANDS[i].handler(arg1[0]?arg1:NULL, arg2[0]?arg2:NULL); return; }
-	}
+	if (cmd[0] == '\0') { *mode_changed_out = false; return; }
+    for (u32 i = 0; i < COMMAND_COUNT; i++) {
+		if (strcmp(COMMANDS[i].name, cmd) == 0) {
+            enum kernel_mode old_mode = current_mode;
+        COMMANDS[i].handler(arg1[0]?arg1:NULL, arg2[0]?arg2:NULL);
+        *mode_changed_out = (old_mode != current_mode);
+        return;
+    }
 	print_string("\n  ? Unknown command\n");
+    *mode_changed_out = false;
 }

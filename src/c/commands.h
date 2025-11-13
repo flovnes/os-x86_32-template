@@ -3,6 +3,6 @@
 
 #include "kernel/kernel.h"
 
-void execute_command(const char *command_line);
+void execute_command(const char *command_line, bool *mode_changed_out);
 
 #endif

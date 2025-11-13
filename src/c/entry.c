@@ -387,11 +387,14 @@ void key_handler(struct keyboard_event event) {
                     }
                 } else if (event.key == KEY_ENTER) {
                     print_char('\n');
-                    execute_command(command_tb.data);
+                    bool mode_changed = false;
+                    execute_command(command_tb.data, &mode_changed);
                     tb_clear(&command_tb);
                     command_rendered_len = 0;
-                    print_string("\n > ");
-                    prompt_start_pos = current_cursor_pos;
+                    if (!mode_changed) {
+                        print_string("\n > ");
+                        prompt_start_pos = current_cursor_pos;
+                    }
                 } else if (event.key_character >= ' ' && event.key_character <= '~') {
                     if (tb_length(&command_tb) < MAX_COMMAND_LENGTH - 1) {
                         char c = event.key_character;

@@ -17,6 +17,14 @@ typedef unsigned char bool;
 #define INTERRUPT_TIMER 0
 #define INTERRUPT_KEYBOARD 1
 
+enum kernel_mode {
+    MODE_NORMAL,
+    MODE_EDITOR,
+    MODE_SCREENSAVER
+};
+
+extern enum kernel_mode current_mode;
+
 /**
  * Reads a single byte from the given port.
  */

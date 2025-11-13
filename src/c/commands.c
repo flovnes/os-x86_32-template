@@ -13,6 +13,7 @@ extern int write_file(const char *filename, const char *content);
 extern int create_file(const char *filename);
 extern int delete_file(const char *filename);
 extern void fs_list_files();
+extern enum kernel_mode current_mode;
 
 void print_u32_dec(u32 value) {
 	char buf[12];

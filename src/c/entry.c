@@ -10,17 +10,13 @@
 #include "commands.h"
 #include <stdbool.h>
 
-enum kernel_mode {
-    MODE_NORMAL,     // shell
-    MODE_EDITOR,
-    MODE_SCREENSAVER
-};
+enum kernel_mode current_mode = MODE_NORMAL;
 
 static unsigned short current_cursor_pos = 0;
 static unsigned short inactivity_counter = 0;
 static const u32 SCREENSAVER_TIMEOUT_TICKS = 360;
 static u32 timer_ticks = 0;
-static enum kernel_mode current_mode = MODE_NORMAL;
+
 
 static char editor_storage[MAX_FILE_CONTENT_LENGTH + 1];
 static TextBuffer editor_tb;
